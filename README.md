@@ -1,2 +1,2 @@
 # multiagentRL
-a reinforcement learning training for router 
+a reinforcement learning training framework for mas router 
