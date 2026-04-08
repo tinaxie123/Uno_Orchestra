@@ -1,0 +1,28 @@
+# Ignore everything by default.
+*
+
+# Keep gitignore itself.
+!.gitignore
+
+# Keep experiment-related documentation only.
+!README.md
+!project_intro.md
+!experiment_plan.md
+!experiment_plan_v2.md
+!experiment_plan_v3.md
+!experimentplan_0329.md
+!EXPERIMENT_GUIDE_explained.md
+!RUNBOOK_local_to_server.md
+
+# Keep the docs under data/.
+!data/
+data/*
+!data/schema_v1_1.md
+!data/preflight_checklist.md
+
+# macOS / editor noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
