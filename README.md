@@ -1,26 +1,21 @@
 # multiagentRL
 
-Experiment planning repository for selective delegation and multi-agent routing.
+This repository uses `router/` as the clean, project-specific workspace for the
+public selective-delegation / router materials that are convenient to sync with
+GitHub.
 
-This repository currently publishes documentation only: the locked experiment plans,
-schema, checklist, and runbooks used to structure the project before large-scale
-data generation and execution.
+## Where To Look
 
-## Documents
+- `router/README.md`: index of the curated router workspace
+- `router/experiment_plan_v3.md`: current locked experiment plan
+- `router/EXPERIMENT_GUIDE_explained.md`: explanation-oriented guide
+- `router/RUNBOOK_local_to_server.md`: local-to-server runbook
+- `router/data/schema_v1_1.md`: locked trajectory schema
+- `router/data/preflight_checklist.md`: pre-run checklist
 
-- `project_intro.md`: project overview and motivation
-- `experiment_plan_v3.md`: current locked experiment plan
-- `experiment_plan_v2.md`: earlier superseded plan kept for reference
-- `experiment_plan.md`: older draft plan
-- `experimentplan_0329.md`: early planning notes
-- `EXPERIMENT_GUIDE_explained.md`: explanation-oriented guide to the setup
-- `RUNBOOK_local_to_server.md`: local-to-server execution runbook
-- `data/schema_v1_1.md`: locked trajectory schema
-- `data/preflight_checklist.md`: pre-run checklist
+## Git Workflow
 
-## Current Status
-
-- Main plan: `experiment_plan_v3.md`
-- Training/evaluation separation is explicitly documented
-- Routing schema is locked at `v1.1`
-- Repository is intentionally limited to experiment documentation
+- Root `README.md` stays as the top-level entry
+- `router/` is the main folder intended for clean syncing and pushing
+- Other local research/code folders can remain in the repo without cluttering
+  the public documentation snapshot

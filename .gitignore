@@ -4,17 +4,22 @@
 # Keep gitignore itself.
 !.gitignore
 
-# Keep experiment-related documentation only.
+# Keep the top-level entry point.
 !README.md
-!experiment_plan_v3.md
-!EXPERIMENT_GUIDE_explained.md
-!RUNBOOK_local_to_server.md
 
-# Keep the docs under data/.
-!data/
-data/*
-!data/schema_v1_1.md
-!data/preflight_checklist.md
+# Keep the curated router workspace.
+!router/
+router/*
+!router/README.md
+!router/experiment_plan_v3.md
+!router/EXPERIMENT_GUIDE_explained.md
+!router/RUNBOOK_local_to_server.md
+
+# Keep the docs under router/data/.
+!router/data/
+router/data/*
+!router/data/schema_v1_1.md
+!router/data/preflight_checklist.md
 
 # macOS / editor noise
 .DS_Store
