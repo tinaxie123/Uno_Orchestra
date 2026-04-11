@@ -1,225 +1,77 @@
-# config/pools.yaml — Worker model pool + skill pool (LOCKED, v3)
-#
-# Single source of truth for the closed-vocabulary action space of the Router.
-# Referenced by:
-#   - data/trajectory_schema.md       (schema cites this file as the vocab source)
-#   - experiment_plan.md     (worker pool, skill pool)
-#   - scripts/validate_schema.py
-#   - scripts/generate_trajectories.py        (distillation prompt enumerates these)
-#   - the RL env (action space)
-#
-# IMPORTANT
-# - `verify` is NOT a skill. Verify is a Leader behavior (schema §2).
-# - `chain_of_thought` is NOT a skill. It is a reasoning mode, not a router action.
-# - `policy_model` is the training backbone. It MUST NOT be a <route> target.
-# - `enforcement: strict` enables the per-model allowed_skills whitelist.
+# Worker model pool + skill pool for the Router's closed-vocabulary action space.
 
-version: v3
-schema_ref: data/trajectory_schema.md
-plan_ref: experiment_plan.md
-
-enforcement: strict
 policy_model: Qwen/Qwen2.5-7B-Instruct
 default_model: claude-haiku-4-5-20251001
+enforcement: strict
 
-# ---------------------------------------------------------------------------
-# Executor pool — 9 models, 6 families, all-latest verified 2026-04-09
-# ---------------------------------------------------------------------------
-
+# 9 executor models across 5 families
 models:
-  # ---- Anthropic (3 tiers: nano / mid / frontier) ----
   - id: claude-haiku-4-5-20251001
     family: anthropic
     tier: nano
     cost_rank: 1
     allowed_skills: [direct_answer, web_search, read_document, extract_field, symbolic_math]
-    repair_preferred: false
-    deprecated: false
 
   - id: claude-sonnet-4-6
     family: anthropic
     tier: mid
     cost_rank: 3
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
-    repair_preferred: true
-    deprecated: false
 
   - id: claude-opus-4-6
     family: anthropic
     tier: large
     cost_rank: 5
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
-    repair_preferred: true
-    deprecated: false
 
-  # ---- OpenAI (frontier + code specialist) ----
   - id: gpt-5.4
     family: openai
     tier: large
     cost_rank: 5
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
-    repair_preferred: true
-    deprecated: false
 
   - id: gpt-5.3-codex
     family: openai
     tier: code-specialist
     cost_rank: 4
     allowed_skills: [direct_answer, symbolic_math, execute_python, execute_shell, call_api, read_code, parse_structured]
-    repair_preferred: false
-    deprecated: false
 
-  # ---- Google (frontier + nano) ----
   - id: gemini-3.1-pro-preview
     family: google
     tier: large
     cost_rank: 3
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
-    repair_preferred: false
-    deprecated: false
 
   - id: gemini-2.5-flash
     family: google
     tier: nano
     cost_rank: 1
     allowed_skills: [direct_answer, web_search, read_document, extract_field]
-    repair_preferred: false
-    deprecated: false
 
-  # ---- Moonshot ----
   - id: kimi-k2.5
     family: moonshot
     tier: large
     cost_rank: 2
     allowed_skills: [direct_answer, reason, web_search, read_document, extract_field, fact_check]
-    repair_preferred: false
-    deprecated: false
 
-  # ---- Alibaba (closed-source flagship, distinct from policy backbone) ----
   - id: qwen3.6-plus
     family: alibaba
     tier: large
     cost_rank: 4
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
-    repair_preferred: false
-    deprecated: false
 
-# ---------------------------------------------------------------------------
-# Skill pool — 11 skills (LOCKED, v3)
-#
-# Design principles (locked):
-#   1. chain_of_thought is NOT a skill (reasoning mode, not router action)
-#   2. verify is NOT a skill (stays in <verify> span)
-#   3. Skills have deliberate overlap (routing is non-trivial)
-#   4. Every skill is an ACTION TYPE, not a domain label or output style
-# ---------------------------------------------------------------------------
-
+# 13 skills
 skills:
   - id: direct_answer
-    executor: none
-    cite: "ReAct (Yao et al., 2022)"
-    description: >
-      Answer from parametric knowledge. No external action. The collapse skill.
-
   - id: reason
-    executor: model-extended
-    cite: "ReAct (Yao et al., 2022); Chain-of-Thought (Wei et al., 2022)"
-    description: >
-      Extended multi-step inference. Overlaps with direct_answer (cost tradeoff)
-      and with symbolic_math / execute_python on reasoning-heavy tasks.
-
   - id: web_search
-    executor: search
-    cite: "RAG (Lewis et al., 2020); WebGPT (Nakano et al., 2021)"
-    description: >
-      Broad information retrieval from web/RAG/index. Overlaps with
-      database_query (structured sources) and read_document (known sources).
-
   - id: database_query
-    executor: sqlite/postgres
-    cite: "Spider (Yu et al., 2018); DIN-SQL (Pourreza & Rafiei, 2023)"
-    description: >
-      Query a structured database via SQL. Overlaps with execute_python
-      (can also query DBs) and web_search (for unstructured equivalent).
-
   - id: read_document
-    executor: document_reader
-    cite: "ReadAgent (Lee et al., 2024); GAIA tool spec (Mialon et al., 2023)"
-    description: >
-      Comprehend a known document (file, URL content, passage). Overlaps with
-      read_code (for code files) and extract_field (for targeted pulls).
-
   - id: read_code
-    executor: code_reader
-    cite: "SWE-agent (Yang et al., 2024)"
-    description: >
-      Understand a codebase, function, or file structure. Overlaps with
-      read_document (general docs) and execute_shell (for repo exploration).
-
   - id: extract_field
-    executor: field_extractor
-    cite: "ReadAgent (Lee et al., 2024); IE literature"
-    description: >
-      Pull a specific datum (entity, number, date, quote) from a source.
-      Overlaps with read_document (full comprehension) and database_query
-      (structured extraction).
-
   - id: parse_structured
-    executor: schema_parser
-    cite: "Outlines (Willard & Louf, 2023); FinMCP-Bench (2026)"
-    description: >
-      Navigate and interpret complex structured data (nested JSON, XML, CSV,
-      XBRL). Distinct from extract_field (single datum) — parse_structured
-      understands the full schema. Overlaps with execute_python (can also
-      parse JSON) and call_api (often used right after an API call).
-
   - id: symbolic_math
-    executor: calculator
-    cite: "MRKL (Karpas et al., 2022); Toolformer (Schick et al., 2023)"
-    description: >
-      Symbolic + numeric calculation (sympy/wolfram). Cheaper than execute_python
-      for inline math. Overlaps with execute_python (can also do math) and
-      direct_answer (model can mental-math simple problems).
-
   - id: execute_python
-    executor: python
-    cite: "PaL (Gao et al., 2023); CodeAct (Wang et al., 2024)"
-    description: >
-      Write and execute Python in a sandbox. The general-purpose computation
-      skill. Can subsume symbolic_math, database_query, call_api — but at
-      higher cost. Use only when cheaper skills don't suffice.
-
   - id: execute_shell
-    executor: bash
-    cite: "SWE-agent (Yang et al., 2024); Terminal-Bench 2.0"
-    description: >
-      Execute bash commands. For filesystem ops, CLI tools, and Unix pipelines.
-      Overlaps with execute_python (can subprocess) and read_code (for
-      exploration via grep/find).
-
   - id: fact_check
-    executor: model+evidence
-    cite: "FEVER (Thorne et al., NAACL 2018); BrowseComp+ evidence aggregation"
-    description: >
-      Verify whether a claim or intermediate result is correct by checking
-      against evidence. Overlaps with reason (logical verification) and
-      web_search (finding counter-evidence). Distinct value: explicitly
-      frames the action as verification, not generation.
-
   - id: call_api
-    executor: function-call
-    cite: "Toolformer (Schick et al., 2023); Gorilla (Patil et al., 2024); ToolBench (Qin et al., 2024)"
-    description: >
-      Invoke a registered external API via structured JSON args. Overlaps
-      with execute_python (can also call APIs via requests library).
-
-# ---------------------------------------------------------------------------
-# Phase 2 deferred skills (NOT in v3)
-# ---------------------------------------------------------------------------
-# - browser_use (playwright) — re-add when live-browse eval is added
-# - summarize — covered by read_document + direct_answer
-# - compare — covered by reason
-# - fact_check — covered by reason + web_search
-# - chain_of_thought — reasoning mode, not a router action (principle 1)
-# - write_code — covered by execute_python
-# - scientific_reasoning / financial_calc — domain labels, not actions (principle 4)
