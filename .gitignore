@@ -1,33 +1,26 @@
 # Ignore everything by default.
 *
 
-# Keep gitignore itself.
+# Keep gitignore and README.
 !.gitignore
-
-# Keep the top-level entry point.
 !README.md
 
-# Keep the curated router workspace.
-!router/
-router/*
-!router/README.md
-!router/experiment_plan_v3.md
-!router/EXPERIMENT_GUIDE_explained.md
-!router/RUNBOOK_local_to_server.md
+# Keep docs.
+!docs/
+!docs/**
 
-# Keep the docs under router/data/.
-!router/data/
-router/data/*
-!router/data/schema_v1_1.md
-!router/data/preflight_checklist.md
-
-# Keep SFT training configs and scripts.
+# Keep configs.
 !configs/
-!configs/sft/
-!configs/sft/**
+!configs/**
+
+# Keep scripts.
 !scripts/
-!scripts/sft/
-!scripts/sft/**
+!scripts/**
+
+# Keep data configs (not actual data files).
+!data/
+!data/*.yaml
+!data/*.md
 
 # macOS / editor noise
 .DS_Store
