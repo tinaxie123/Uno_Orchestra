@@ -17,6 +17,10 @@
 !scripts/
 !scripts/**
 
+# Keep agent system code.
+!agent_system/
+!agent_system/**
+
 # Keep data configs (not actual data files).
 !data/
 !data/*.yaml
