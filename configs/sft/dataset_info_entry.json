@@ -1,0 +1,9 @@
+{
+  "router_sft_v2": {
+    "file_name": "router_sft_sharegpt.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    }
+  }
+}

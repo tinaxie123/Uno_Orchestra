@@ -1,5 +1,5 @@
 ### model
-model_name_or_path: /home/xieht/data/models/Qwen/Qwen2.5-7B-Instruct-real
+model_name_or_path: Qwen/Qwen2.5-7B-Instruct  # or local path
 trust_remote_code: true
 
 ### method
@@ -17,7 +17,7 @@ dataloader_num_workers: 4
 packing: true
 
 ### output
-output_dir: /home/xieht/data/sft/checkpoints/router_qwen25_7b_full_sft
+output_dir: outputs/router_qwen25_7b_full_sft
 logging_steps: 10
 save_steps: 500
 plot_loss: true
