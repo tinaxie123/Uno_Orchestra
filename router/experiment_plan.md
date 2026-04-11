@@ -3,7 +3,7 @@
 **Status**: Locked. Supersedes `experiment_plan_v2.md`. Single source of truth for benchmark allocation, training data sourcing, and contamination policy.
 
 **Relation to other locked documents**:
-- `data/schema_v1_1.md` — trajectory schema (LOCKED)
+- `data/trajectory_schema.md` — trajectory schema (LOCKED)
 - This file — benchmark allocation + Phase 1 SFT recipe (LOCKED)
 - `config/pools.yaml` — worker + skill pools (to be written, must conform to §4–§5 here)
 - `config/sft_recipe.yaml` — Phase 1 recipe (to be written, must conform to §2.1 here)
@@ -202,7 +202,7 @@ Triggered only if Phase 1 SFT + RL runs reveal a measurable signal gap in some d
 | opus | `claude-opus-4-6` | MuSiQue, StrategyQA, MATH (L3-5), TheoremQA, CodeContests, LogiQA, FOLIO, BBH, Qasper, QuALITY, LegalBench, FinQA | ~14,000 |
 | sonnet | `claude-sonnet-4-6` | All other Phase 1 datasets | ~27,500 |
 
-Distillation prompt enforces schema v1.1 strictly (see `data/schema_v1_1.md` §7).
+Distillation prompt enforces schema strictly (see `data/trajectory_schema.md` §7).
 
 Required behavioral mix in distilled output:
 - ≥ 30% lazy mode (no `<plan>`, direct `<final_answer>`)
@@ -227,7 +227,7 @@ Required behavioral mix in distilled output:
 
 DeepSeek, GLM, Doubao, MiniMax, Hunyuan, old Llama: deliberately excluded — do not meet the pool quality bar for our target benchmarks.
 
-Per-model `allowed_skills` whitelists are defined in `config/pools.yaml` and enforced by `scripts/schema_validator.py` in strict mode (default). Setting `enforcement: free` disables the whitelist for ablation.
+Per-model `allowed_skills` whitelists are defined in `config/pools.yaml` and enforced by `scripts/validate_schema.py` in strict mode (default). Setting `enforcement: free` disables the whitelist for ablation.
 
 ---
 
@@ -256,11 +256,11 @@ Phase 2 candidates (not in v1): `entity_disambiguate`, `citation_grounding`, `co
 
 ## 6. Implementation Order (LOCKED)
 
-1. **schema v1.1** — done, `data/schema_v1_1.md` LOCKED.
-2. **`scripts/schema_validator.py`** — implement all 16 rules from schema v1.1 §3 as executable checks.
+1. **schema** — done, `data/trajectory_schema.md` LOCKED.
+2. **`scripts/validate_schema.py`** — implement all 16 rules from schema §3 as executable checks.
 3. **`config/pools.yaml`** — codify §4 and §5.
 4. **`config/sft_recipe.yaml`** — codify §2.1.
-5. **`scripts/distill.py`** — distillation prompt + opus/sonnet routing + validator filter + dual output (SFT messages parquet + RL prompt parquet).
+5. **`scripts/generate_trajectories.py`** — distillation prompt + opus/sonnet routing + validator filter + dual output (SFT messages parquet + RL prompt parquet).
 6. **30-sample dry run** — 2–3 per main domain, manual review.
 7. **Decontamination pass** — 13-gram against the union of §1.2 + §1.3 + §1.4.
 8. **Full Phase 1 distillation** (~41.5k).

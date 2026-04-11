@@ -1,4 +1,4 @@
-# Trajectory Schema v1.1 (LOCKED)
+# Trajectory Schema 
 
 **Status**: LOCKED — single source of truth for SFT data, RL data, distillation prompts, parser, env implementation, and the paper's Method section.
 
@@ -6,7 +6,7 @@
 
 **Compatibility**: ChatML multi-turn, verl-agent `MultiTurnSFTDataset`, parquet storage.
 
----
+***
 
 ## 1. Design summary
 
@@ -16,28 +16,31 @@
 - **Two policies in the credit-assignment sense, one network in the parameter sense.**
 - **Capability routing, not agent orchestration**: every routed call is a stateless capability invocation; `direct_solve` is a first-class skill.
 
----
+***
 
 ## 2. Tag definitions
 
-| Tag | Role | Required attrs | Optional attrs | Semantics |
-|---|---|---|---|---|
-| `<plan round="N">…</plan>` | assistant | `round` | — | Container for one decomposition round |
-| `<subtask id="K" depends_on="…">…</subtask>` | assistant (inside `<plan>`) | `id`, `depends_on` | — | One node in the task DAG |
-| `<route round="N" subtask="K" model="…" skill="…">…</route>` | assistant | `round`, `subtask`, `model`, `skill` | — | Capability assignment for one subtask (Router decision anchor) |
-| `<obs subtask="K">…</obs>` | tool | `subtask` | — | Environment feedback for one subtask |
-| `<verify round="N" status="…" target="…">…</verify>` | assistant | `round`, `status` | `target` (only when `status="repair_needed"`) | Verifier judgement |
-| `<final_answer>…</final_answer>` | assistant | — | — | Termination |
+| Tag                                                          | Role                        | Required attrs                       | Optional attrs                                | Semantics                                                      |
+| ------------------------------------------------------------ | --------------------------- | ------------------------------------ | --------------------------------------------- | -------------------------------------------------------------- |
+| `<plan round="N">…</plan>`                                   | assistant                   | `round`                              | —                                             | Container for one decomposition round                          |
+| `<subtask id="K" depends_on="…">…</subtask>`                 | assistant (inside `<plan>`) | `id`, `depends_on`                   | —                                             | One node in the task DAG                                       |
+| `<route round="N" subtask="K" model="…" skill="…">…</route>` | assistant                   | `round`, `subtask`, `model`, `skill` | —                                             | Capability assignment for one subtask (Router decision anchor) |
+| `<obs subtask="K">…</obs>`                                   | tool                        | `subtask`                            | —                                             | Environment feedback for one subtask                           |
+| `<verify round="N" status="…" target="…">…</verify>`         | assistant                   | `round`, `status`                    | `target` (only when `status="repair_needed"`) | Verifier judgement                                             |
+| `<final_answer>…</final_answer>`                             | assistant                   | —                                    | —                                             | Termination                                                    |
 
 ### Removed in v1.1
+
 - ❌ `<think>`: not in v1.1. Distillation must not produce reasoning traces. A future v1.2 may reintroduce a short `<reasoning>` (≤ 30 words) for a high-quality subset only.
 
 ### Closed-vocabulary attributes
+
 - `model` ∈ `available_models` (declared in `config/pools.yaml`).
 - `skill` ∈ `available_skills` (declared in `config/pools.yaml`); v1.1 set is `{direct_solve, retrieval, code_exec, math_calc}`.
 - `model` and `skill` MUST be string literals from these closed sets. Free-form values are invalid samples and are dropped by the parser.
 
 ### Attribute conventions
+
 - `depends_on`: **always present**. No dependencies → `depends_on=""`. Multiple dependencies → comma-separated, ascending: `depends_on="1,2"` (not `"2,1"`).
 - `subtask.id`: globally strictly increasing across all rounds; ids are never reused.
 - `route.round`: must equal the `round` of the `<plan>` containing the referenced `<subtask>`.
@@ -45,11 +48,12 @@
 - `verify.status`: strict enum `{"pass", "repair_needed"}`.
 
 ### `skill="direct_solve"`
+
 - Means: invoke the chosen `model` with no external tool. The model answers from its parametric knowledge alone.
 - This is the **collapse action**: routing a subtask to `direct_solve` is the policy declaring "no tool needed for this subtask".
 - It is distinct from emitting `<final_answer>` directly without any `<plan>` (the *lazy mode*, which collapses the whole question to zero decomposition).
 
----
+***
 
 ## 3. Validity constraints (parser-enforced; violating samples are discarded)
 
@@ -64,7 +68,7 @@
 7. `<route>`'s `round` attribute MUST equal the `round` of the `<plan>` containing the referenced `<subtask>`.
 8. `<verify round="N">` MUST appear immediately after all `<obs>` of round N.
 9. `<verify status="pass">` MUST be followed by `<final_answer>` (no further `<plan>`).
-10. **`<verify status="repair_needed">` MUST be followed by `<plan round="N+1">`**. It is *not* allowed to be followed directly by `<final_answer>` — repair_needed implies another decomposition round. (A future "best_effort" status may be introduced if a giving-up branch is needed; v1.1 does not allow it.)
+10. **`<verify status="repair_needed">`** **MUST be followed by** **`<plan round="N+1">`**. It is *not* allowed to be followed directly by `<final_answer>` — repair\_needed implies another decomposition round. (A future "best\_effort" status may be introduced if a giving-up branch is needed; v1.1 does not allow it.)
 11. `<verify status="repair_needed">`'s `target` MUST be a non-empty ascending comma-separated list of already-declared `<subtask>` ids.
 12. `route.model` ∈ `available_models`; `route.skill` ∈ `available_skills`.
 13. Total `<route>` count across all rounds ≤ 8.
@@ -72,7 +76,7 @@
 15. `<obs>` MAY appear only in `role: "tool"` turns.
 16. `<plan>`, `<subtask>`, `<route>`, `<verify>`, `<final_answer>` MAY appear only in `role: "assistant"` turns.
 
----
+***
 
 ## 4. Loss-mask regions (SFT)
 
@@ -83,23 +87,25 @@ verl `MultiTurnSFTDataset` masks by message role automatically.
 
 No additional masking configuration is required.
 
----
+***
 
 ## 5. RL credit-assignment regions (GiGPO)
 
-| Span type | Includes | Advantage source |
-|---|---|---|
-| **Leader span** | `<plan>` (with all `<subtask>` children); `<final_answer>` | Episode-level group baseline (across N rollouts of the same query) |
-| **Router span** | each `<route>` (a subtask-level routing decision **anchor**) | Step-level group baseline, constructed across alternative route realizations sampled at the same query × same round × same subtask slot |
-| **Verify span** | each `<verify>` | Independent advantage; if final answer is wrong but `verify.status="pass"`, the verify span receives a dedicated negative advantage that does not pollute Leader/Router spans |
+| Span type       | Includes                                                     | Advantage source                                                                                                                                                              |
+| --------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Leader span** | `<plan>` (with all `<subtask>` children); `<final_answer>`   | Episode-level group baseline (across N rollouts of the same query)                                                                                                            |
+| **Router span** | each `<route>` (a subtask-level routing decision **anchor**) | Step-level group baseline, constructed across alternative route realizations sampled at the same query × same round × same subtask slot                                       |
+| **Verify span** | each `<verify>`                                              | Independent advantage; if final answer is wrong but `verify.status="pass"`, the verify span receives a dedicated negative advantage that does not pollute Leader/Router spans |
 
 ### Method-section phrasing (use verbatim)
+
 > Each `<route>` span serves as the **anchor** for a subtask-level routing decision. Step-level grouping is constructed across alternative route realizations sampled at the same query, same round, and same subtask slot, rather than across different subtasks within a single plan.
 
 ### Implementation note
+
 At rollout time, in addition to the N episode-level rollouts, for each `<subtask>` we additionally sample K alternative `<route>` realizations (keeping the plan fixed). These K samples form the step-level group for that subtask slot. Default: N=8, K=4.
 
----
+***
 
 ## 6. Canonical exemplars
 
@@ -114,6 +120,7 @@ messages = [
     {"role": "assistant", "content": "<final_answer>Paris</final_answer>"},
 ]
 ```
+
 Demonstrates: full collapse to `<final_answer>` with no `<plan>` and no `<route>`.
 
 ### Exemplar 2 — One-shot success (plan + parallel route + verify pass)
@@ -151,6 +158,7 @@ messages = [
     },
 ]
 ```
+
 Demonstrates: dependency-aware DAG, mixed `direct_solve` / `retrieval` / `code_exec`, dependency-respecting execution, single-round verify pass.
 
 ### Exemplar 3 — Repair loop
@@ -192,9 +200,10 @@ messages = [
     },
 ]
 ```
+
 Demonstrates: verify-triggered repair, tier escalation (haiku → sonnet) on retry, monotonic id sequence across rounds, ≤ 2 repair rounds.
 
----
+***
 
 ## 7. Distillation prompt requirements
 
@@ -211,7 +220,7 @@ The distillation prompt MUST enforce all of the following on the teacher model o
 9. `model` and `skill` MUST be exact strings from the closed vocabularies in `config/pools.yaml`.
 10. `target`, `depends_on`, and any other multi-id list are written in **ascending order**.
 
----
+***
 
 ## 8. Parser regex (reference implementation)
 
@@ -234,7 +243,7 @@ FINAL_RE   = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
 
 The parser uses these regexes to (a) verify all validity constraints in §3, (b) extract span boundaries for RL credit assignment per §5, and (c) compute the analysis metadata listed in §10.
 
----
+***
 
 ## 9. Storage layout
 
@@ -242,37 +251,39 @@ The parser uses these regexes to (a) verify all validity constraints in §3, (b)
 
 Columns:
 
-| Column | Type | Description |
-|---|---|---|
-| `messages` | list[dict] | ChatML; this is the **only column read by `MultiTurnSFTDataset`** |
-| `id` | str | Unique sample id, e.g. `hotpotqa_train_5e4f3a` |
-| `data_source` | str | HF dataset name |
-| `domain` | str | One of the 10 SFT recipe domains |
-| `difficulty` | str | `easy` / `medium` / `hard` |
-| `n_subtasks_planned` | int | Total `<subtask>` count |
-| `n_routes` | int | Total `<route>` count |
-| `n_rounds` | int | Total `<plan>` rounds |
-| `n_repair_rounds` | int | `n_rounds − 1` |
-| `is_lazy` | bool | True iff trajectory has zero `<route>` |
-| `models_used` | list[str] | Distinct `model` values across all `<route>` |
-| `skills_used` | list[str] | Distinct `skill` values across all `<route>` |
-| `ground_truth` | str | Verifier reference answer |
-| `distilled_by` | str | Teacher model id |
-| `format_valid` | bool | Always True (invalid samples are not written) |
-| `answer_verified` | bool | Whether the final answer matches gold via the source's verifier |
-| `input_tokens` | int | Teacher input token count |
-| `output_tokens` | int | Teacher output token count |
+| Column               | Type        | Description                                                           |
+| -------------------- | ----------- | --------------------------------------------------------------------- |
+| `messages`           | list\[dict] | ChatML; this is the **only column read by** **`MultiTurnSFTDataset`** |
+| `id`                 | str         | Unique sample id, e.g. `hotpotqa_train_5e4f3a`                        |
+| `data_source`        | str         | HF dataset name                                                       |
+| `domain`             | str         | One of the 10 SFT recipe domains                                      |
+| `difficulty`         | str         | `easy` / `medium` / `hard`                                            |
+| `n_subtasks_planned` | int         | Total `<subtask>` count                                               |
+| `n_routes`           | int         | Total `<route>` count                                                 |
+| `n_rounds`           | int         | Total `<plan>` rounds                                                 |
+| `n_repair_rounds`    | int         | `n_rounds − 1`                                                        |
+| `is_lazy`            | bool        | True iff trajectory has zero `<route>`                                |
+| `models_used`        | list\[str]  | Distinct `model` values across all `<route>`                          |
+| `skills_used`        | list\[str]  | Distinct `skill` values across all `<route>`                          |
+| `ground_truth`       | str         | Verifier reference answer                                             |
+| `distilled_by`       | str         | Teacher model id                                                      |
+| `format_valid`       | bool        | Always True (invalid samples are not written)                         |
+| `answer_verified`    | bool        | Whether the final answer matches gold via the source's verifier       |
+| `input_tokens`       | int         | Teacher input token count                                             |
+| `output_tokens`      | int         | Teacher output token count                                            |
 
 ### RL parquet — `data/rl/rl_pool.parquet`
 
 Same `id` keying as the SFT parquet (one-to-one with the SFT samples). Columns mirror verl-agent's expected format (`data_source`, `prompt`, `ability`, `reward_model`, `extra_info`); see `data/rl_format.md` for details. The `prompt` column contains only system + user messages; trajectories are generated by the env at rollout time, not stored.
 
----
+***
 
 ## 10. Lock status
 
-Schema **v1.1 LOCKED** as of this commit. All downstream artifacts (`config/pools.yaml`, `config/sft_recipe.yaml`, `scripts/distill.py`, the env implementation, and the paper's Method section) MUST conform to this document. Any change requires bumping to v1.2 and updating all dependents.
+Schema **v1.1 LOCKED** as of this commit. All downstream artifacts (`config/pools.yaml`, `config/sft_recipe.yaml`, `scripts/generate_trajectories.py`, the env implementation, and the paper's Method section) MUST conform to this document. Any change requires bumping to v1.2 and updating all dependents.
 
 ### Changelog from earlier drafts
+
 - v0 → v1.0: introduced `<plan>`, `<route>`, `<obs>`, `<verify>`, `<final_answer>`, `round`, explicit `depends_on`, single-shot decomposition + repair.
 - v1.0 → v1.1: (1) `skill="none"` → `skill="direct_solve"`; (2) `verify status="repair_needed"` MUST be followed by `<plan>`, never directly by `<final_answer>`; (3) dependency-declaration constraint reworded to reference declaration order, not temporal order; (4) `model`/`skill` declared as closed vocabularies; (5) `target` and `depends_on` lists declared ascending; (6) `<think>` removed.
+

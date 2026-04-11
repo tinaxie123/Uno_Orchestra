@@ -1,0 +1,372 @@
+# config/sft_recipe.yaml — Phase 1 SFT distillation recipe (LOCKED)
+#
+# Codifies experiment_plan.md §2.1.
+# Total: 41,500 samples across 10 domains and 27 datasets.
+# Distillation: claude-opus-4-6 (~14k) + claude-sonnet-4-6 (~27.5k).
+# Estimated cost: $1,800–$2,200 (see preflight checklist Phase C).
+#
+# IMPORTANT
+# - `distill_model` here refers to the TEACHER model used at distillation
+#   time, NOT to the executor pool defined in config/pools.yaml. Teachers and
+#   executors are different concepts: the teacher generates the trajectory
+#   text; the executor pool is what the trained Router can route to.
+# - claude-sonnet-4-6 is a valid TEACHER even though it is not in the
+#   executor pool, because it does not appear as a `<route model="...">`
+#   value, only as the source of supervision signal.
+# - All eval-only benchmark families listed in experiment_plan §1.5 are
+#   forbidden as data sources here. The validator script
+#   `scripts/availability_probe.py` enforces this at probe time.
+
+
+schema_ref: data/trajectory_schema.md
+plan_ref: experiment_plan.md
+pools_ref: config/pools.yaml
+
+# Total target sample count. The yaml is invalid if the actual sum diverges
+# by more than 100 from this value (sanity check below).
+target_total: 41500
+tolerance: 100
+
+# Behavioral mix targets (enforced at distillation time, not at recipe
+# definition time; copied here from preflight_checklist for reference).
+behavioral_targets:
+  lazy_fraction_min: 0.10
+  lazy_fraction_max: 0.30
+  repair_fraction_min: 0.15
+  repair_fraction_max: 0.40
+
+# Difficulty taxonomy used by `difficulty` below.
+difficulty_levels: [easy, medium, hard]
+
+# Distillation teachers. Both must be reachable via the configured endpoint.
+teachers:
+  - id: claude-opus-4-6
+    role: hard tasks (deep multi-hop, hard math, code algorithms, formal logic, professional domains, long context)
+  - id: claude-sonnet-4-6
+    role: easy/medium tasks (single-hop, simple math, mainstream code, commonsense, STEM)
+
+# ---------------------------------------------------------------------------
+# Datasets (27 entries, 10 domains)
+# ---------------------------------------------------------------------------
+
+datasets:
+
+  # ============================================================
+  # Domain 1: Multi-hop QA  (11,000)
+  # ============================================================
+
+  - name: hotpotqa_fullwiki
+    hf_path: hotpot_qa
+    hf_subset: fullwiki
+    split: train
+    n_samples: 4000
+    domain: multihop_qa
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+    notes: must use fullwiki, not distractor
+
+  - name: 2wikimultihopqa
+    hf_path: voidful/2WikiMultihopQA
+    split: train
+    n_samples: 3000
+    domain: multihop_qa
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+
+  - name: musique_answerable
+    hf_path: dgslibisey/MuSiQue
+    split: train
+    n_samples: 2500
+    domain: multihop_qa
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: 3+ hop, the deepest decomposition signal
+
+  - name: strategyqa
+    hf_path: voidful/StrategyQA
+    split: train
+    n_samples: 1500
+    domain: multihop_qa
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: implicit multi-hop, yes/no
+
+  # ============================================================
+  # Domain 2: Single-hop / Lazy supervision  (6,000)
+  # ============================================================
+
+  - name: nq_open
+    hf_path: nq_open
+    split: train
+    n_samples: 3000
+    domain: single_hop_lazy
+    difficulty: easy
+    distill_model: claude-sonnet-4-6
+    notes: PRIMARY lazy-mode signal source
+
+  - name: triviaqa_nocontext
+    hf_path: mandarjoshi/trivia_qa
+    hf_subset: rc
+    split: train
+    n_samples: 2000
+    domain: single_hop_lazy
+    difficulty: easy
+    distill_model: claude-sonnet-4-6
+
+  - name: webquestions
+    hf_path: web_questions
+    split: train
+    n_samples: 1000
+    domain: single_hop_lazy
+    difficulty: easy
+    distill_model: claude-sonnet-4-6
+
+  # ============================================================
+  # Domain 3: Math  (6,000)
+  # ============================================================
+
+  - name: gsm8k_main
+    hf_path: openai/gsm8k
+    hf_subset: main
+    split: train
+    n_samples: 2000
+    domain: math
+    difficulty: easy
+    distill_model: claude-sonnet-4-6
+
+  - name: hendrycks_math_algebra
+    hf_path: EleutherAI/hendrycks_math
+    hf_subset: algebra
+    split: train
+    n_samples: 1000
+    domain: math
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: filter to level 3-5 at distillation time
+
+  - name: hendrycks_math_intermediate_algebra
+    hf_path: EleutherAI/hendrycks_math
+    hf_subset: intermediate_algebra
+    split: train
+    n_samples: 800
+    domain: math
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: filter to level 3-5 at distillation time
+
+  - name: hendrycks_math_number_theory
+    hf_path: EleutherAI/hendrycks_math
+    hf_subset: number_theory
+    split: train
+    n_samples: 700
+    domain: math
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: filter to level 3-5 at distillation time
+
+  - name: theoremqa
+    hf_path: TIGER-Lab/TheoremQA
+    split: test
+    n_samples: 800
+    domain: math
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: only test split available; ~800 samples total, full coverage
+
+  - name: aqua_rat
+    hf_path: deepmind/aqua_rat
+    split: train
+    n_samples: 700
+    domain: math
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+
+  # ============================================================
+  # Domain 4: Code  (5,000)
+  # ============================================================
+
+  - name: codeforces_cots
+    hf_path: open-r1/codeforces-cots
+    split: train
+    n_samples: 2500
+    domain: code
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+    notes: replaces broken codeparrot/apps; codeforces problems with reasoning chains
+
+  - name: codecontests
+    hf_path: deepmind/code_contests
+    split: train
+    n_samples: 2500
+    domain: code
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: hard algorithmic problems
+
+  # ============================================================
+  # Domain 5: STEM  (4,500)
+  # ============================================================
+
+  - name: sciq
+    hf_path: allenai/sciq
+    split: train
+    n_samples: 1000
+    domain: stem
+    difficulty: easy
+    distill_model: claude-sonnet-4-6
+
+  - name: arc_challenge
+    hf_path: allenai/ai2_arc
+    hf_subset: ARC-Challenge
+    split: train
+    n_samples: 1000
+    domain: stem
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+
+  - name: openbookqa
+    hf_path: allenai/openbookqa
+    split: train
+    n_samples: 800
+    domain: stem
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+
+  - name: mmlu_aux_stem
+    hf_path: cais/mmlu
+    hf_subset: all
+    split: auxiliary_train
+    n_samples: 1700
+    domain: stem
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+    notes: official auxiliary_train split (not the eval test split); subset must be "all"
+
+  # ============================================================
+  # Domain 6: Commonsense / Social  (4,000)
+  # ============================================================
+
+  - name: commonsenseqa
+    hf_path: tau/commonsense_qa
+    split: train
+    n_samples: 1500
+    domain: commonsense_social
+    difficulty: easy
+    distill_model: claude-sonnet-4-6
+
+  - name: piqa
+    hf_path: lighteval/piqa
+    split: train
+    n_samples: 1000
+    domain: commonsense_social
+    difficulty: easy
+    distill_model: claude-sonnet-4-6
+    notes: parquet mirror; original ybisk/piqa uses deprecated loading script
+
+  - name: social_iqa
+    hf_path: lighteval/siqa
+    split: train
+    n_samples: 800
+    domain: commonsense_social
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+    notes: parquet mirror; original allenai/social_i_qa uses deprecated loading script
+
+  - name: winogrande
+    hf_path: allenai/winogrande
+    hf_subset: winogrande_xl
+    split: train
+    n_samples: 700
+    domain: commonsense_social
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+
+  # ============================================================
+  # Domain 7: Formal logic  (1,800)
+  # ============================================================
+
+  - name: logiqa2
+    hf_path: datatune/LogiQA2.0
+    split: train
+    n_samples: 800
+    domain: formal_logic
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: parquet mirror; replaces broken lighteval/logiqa2
+
+  - name: folio
+    hf_path: tasksource/folio
+    split: train
+    n_samples: 600
+    domain: formal_logic
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: first-order logic; tasksource mirror replaces gated yale-nlp/FOLIO
+
+  - name: bbh_logical_deduction
+    hf_path: lukaemon/bbh
+    hf_subset: logical_deduction_seven_objects
+    split: test
+    n_samples: 200
+    domain: formal_logic
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: BBH only has test split; ~250 examples per subset, 200 used
+
+  - name: bbh_formal_fallacies
+    hf_path: lukaemon/bbh
+    hf_subset: formal_fallacies
+    split: test
+    n_samples: 200
+    domain: formal_logic
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: BBH only has test split; ~250 examples per subset, 200 used
+
+  # ============================================================
+  # Domain 8: Long context / reading  (900)
+  # ============================================================
+
+  - name: quality
+    hf_path: emozilla/quality
+    split: train
+    n_samples: 900
+    domain: long_context
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: long-article multiple choice; absorbs qasper's 500 budget after qasper was dropped (allenai/qasper uses deprecated loading script and no parquet mirror found)
+
+  # ============================================================
+  # Domain 9: Domain knowledge (legal / financial)  (900)
+  # ============================================================
+
+  - name: legalbench
+    hf_path: nguha/legalbench
+    split: train
+    n_samples: 500
+    domain: domain_knowledge
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: balance across 5-8 subtasks at probe time
+
+  - name: finqa
+    hf_path: ChanceFocus/flare-finqa
+    split: train
+    n_samples: 400
+    domain: domain_knowledge
+    difficulty: hard
+    distill_model: claude-opus-4-6
+    notes: financial numerical reasoning, suitable for code_exec routing; replaces broken dreamerdeo/finqa with FLARE benchmark mirror
+
+  # ============================================================
+  # Domain 10: Tool / Agent supervision  (1,400)
+  # ============================================================
+
+  - name: toolace
+    hf_path: Team-ACE/ToolACE
+    split: train
+    n_samples: 1400
+    domain: tool_agent
+    difficulty: medium
+    distill_model: claude-sonnet-4-6
+    notes: 11k high-quality synthetic tool-use; absorbs api_bank's 600 budget after api_bank was dropped (no working HF mirror found for liyucheng/api-bank)

@@ -1,0 +1,6 @@
+# Large data files (stored on server, not in git)
+*.parquet
+*.jsonl
+checkpoints/
+__pycache__/
+*.pyc

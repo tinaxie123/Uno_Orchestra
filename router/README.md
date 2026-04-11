@@ -1,29 +1,32 @@
-# Router Workspace
+# Learned Selective Delegation Router
 
-This folder is the clean, Git-friendly workspace for the selective-delegation
-router project.
+Multi-agent orchestration via learned routing. The router decomposes questions into subtasks and routes each to the best (model, skill) pair.
 
-## Included Files
+## Structure
 
-- `experiment_plan_v3.md`: current locked experiment plan
-- `EXPERIMENT_GUIDE_explained.md`: explanation-oriented project guide
-- `RUNBOOK_local_to_server.md`: operational runbook from local development to
-  remote execution
-- `data/schema_v1_1.md`: locked trajectory schema
-- `data/preflight_checklist.md`: gated checklist before paid distillation
-
-## Sync Rule
-
-- If a file should be easy to push and keep public, place it under `router/`
-- Root `README.md` only acts as the repository entry point
-- Local experiments, baselines, scripts, and scratch artifacts can stay outside
-  this folder without affecting the clean public snapshot
-
-## Suggested Daily Workflow
-
-```bash
-git status
-git add router README.md .gitignore
-git commit -m "docs: update router workspace"
-git push
 ```
+router/
+  pipeline.md                 # Complete data generation & training pipeline
+  experiment_plan.md       # Experiment design (locked)
+  experiment_guide.md
+  config/
+    pools.yaml                # 9 models, 13 skills
+    sft_recipe.yaml           # 31 datasets, 10 domains, 41.5k targets
+  scripts/
+    generate_trajectories.py                # Teacher distillation → trajectory JSONL
+    validate_schema.py       # Schema validation (16 rules)
+    build_dataset.py        # JSONL → training parquet
+    audit_quality.py              # Dataset quality audit
+  data/
+    trajectory_schema.md            # Trajectory schema specification
+    checklist.md    # Pre-distillation gates
+    train_final_stats.json    # Final dataset statistics (58,457 samples)
+```
+
+## Quick Start
+
+See [pipeline.md](pipeline.md) for the complete pipeline from distillation to training.
+
+## Dataset
+
+58,457 validated trajectories across 9 domains. Schema, 100% pass rate. Training data at server `/home/xieht/data/sft/train_final.parquet`.

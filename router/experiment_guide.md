@@ -9,11 +9,11 @@
 - 代码和实验接下来应该按什么顺序推进
 
 如果你要看**硬约束**，请以以下文件为准：
-- `data/schema_v1_1.md`
+- `data/trajectory_schema.md`
 - `experiment_plan_v2.md`
 - `config/pools.yaml`
 - `config/sft_recipe.yaml`
-- `scripts/schema_validator.py`
+- `scripts/validate_schema.py`
 
 ---
 
@@ -322,11 +322,11 @@ MMLU 这类热门 benchmark 当然可以作为 eval，但它们不适合承担�
 1. 锁 schema
 2. 锁 experiment plan
 3. 锁 benchmark split
-4. 写 `schema_validator.py`
+4. 写 `validate_schema.py`
 5. 写 `pools.yaml`
 6. 写 `sft_recipe.yaml`
 7. 写 `availability_probe.py`
-8. 写 `distill.py`
+8. 写 `generate_trajectories.py`
 9. 跑 30 条 dry run
 10. 跑 300–500 条 pilot
 11. 再开全量蒸馏
@@ -345,7 +345,7 @@ MMLU 这类热门 benchmark 当然可以作为 eval，但它们不适合承担�
 
 ## 11. 当前最重要的几个文件分别干嘛
 
-### `data/schema_v1_1.md`
+### `data/trajectory_schema.md`
 定义 trajectory 格式：
 - 什么 tag 合法
 - 什么顺序合法
@@ -368,7 +368,7 @@ MMLU 这类热门 benchmark 当然可以作为 eval，但它们不适合承担�
 - 41.5k 样本
 - 每个数据集的 teacher / 抽样规模 / 备注
 
-### `scripts/schema_validator.py`
+### `scripts/validate_schema.py`
 定义“合格轨迹”的检查器：
 - 规则验证
 - 错误码
@@ -417,7 +417,7 @@ MMLU 这类热门 benchmark 当然可以作为 eval，但它们不适合承担�
 
 1. 跑 `availability_probe.py`
 2. 修掉 probe 中暴露的数据源问题
-3. 完成 `distill.py`
+3. 完成 `generate_trajectories.py`
 4. 做 30 条 dry run
 5. 人工 review
 6. 再决定是否放量
