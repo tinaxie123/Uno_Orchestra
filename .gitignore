@@ -21,6 +21,14 @@ router/data/*
 !router/data/schema_v1_1.md
 !router/data/preflight_checklist.md
 
+# Keep SFT training configs and scripts.
+!configs/
+!configs/sft/
+!configs/sft/**
+!scripts/
+!scripts/sft/
+!scripts/sft/**
+
 # macOS / editor noise
 .DS_Store
 .vscode/
