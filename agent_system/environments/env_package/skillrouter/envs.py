@@ -4,21 +4,31 @@ SkillRouter Environment for verl-agent.
 Each episode:
 1. Model receives a question
 2. Model generates <plan> + <route> tags (assistant turn)
-3. Environment parses routes, simulates sub-agent execution, returns <obs> (tool turn)
+3. Environment parses routes, calls real LLM API as sub-agent, returns <obs>
 4. Model generates <verify> + optionally <final_answer> or repair <plan>
 5. Repeat until <final_answer> or max_steps
 
-Reward: correctness(final_answer, gold) - lambda * token_cost
+Reward: Router-R1 style R = (1-α)*R_outcome + α*R_cost
+
+Sub-agent: real API calls to qwen-plus via DashScope.
+Every route gets a real LLM response regardless of skill choice.
+The model must learn which (model, skill) combination actually works.
 """
 
 import re
+import string
 import concurrent.futures
+import os
 from typing import Any, Dict, List, Tuple
-from copy import deepcopy
 
 import gym
 import numpy as np
 from omegaconf import DictConfig
+
+try:
+    import openai
+except ImportError:
+    openai = None
 
 
 # --- Schema v1.1 Parsers ---
@@ -28,74 +38,107 @@ ROUTE_RE = re.compile(
     r'<route round="(\d+)" subtask="(\d+)" model="([^"]+)" skill="([^"]+)">(.*?)</route>',
     re.DOTALL,
 )
-VERIFY_RE = re.compile(
-    r'<verify round="(\d+)" status="(pass|repair_needed)"(?: target="([^"]*)")?>(.*?)</verify>',
-    re.DOTALL,
-)
 FINAL_RE = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
+
+# Valid pools
+VALID_MODELS = {
+    "claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6",
+    "gpt-5.4", "gpt-5.3-codex", "gemini-3.1-pro-preview", "gemini-2.5-flash",
+    "kimi-k2.5", "qwen3.6-plus",
+}
+VALID_SKILLS = {
+    "direct_answer", "reason", "web_search", "database_query", "read_document",
+    "read_code", "extract_field", "parse_structured", "symbolic_math",
+    "execute_python", "execute_shell", "fact_check", "call_api",
+}
+
+# Per-token cost (USD per 1M output tokens)
+MODEL_COST_PER_M_TOKENS = {
+    "claude-haiku-4-5-20251001": 1.25,
+    "gemini-2.5-flash": 1.50,
+    "kimi-k2.5": 2.00,
+    "claude-sonnet-4-6": 15.00,
+    "gemini-3.1-pro-preview": 10.00,
+    "gpt-5.3-codex": 20.00,
+    "qwen3.6-plus": 8.00,
+    "claude-opus-4-6": 75.00,
+    "gpt-5.4": 60.00,
+}
+MAX_COST_PER_ROUTE = MODEL_COST_PER_M_TOKENS["claude-opus-4-6"] * 500 / 1e6
+MAX_EPISODE_COST = MAX_COST_PER_ROUTE * 8
+DEFAULT_ALPHA = 0.1
+
+# Skill → system prompt for sub-agent
+SKILL_PROMPTS = {
+    "direct_answer": "Answer the following question directly and concisely.",
+    "reason": "Reason step by step about the following question, then give a final answer.",
+    "web_search": "You are a search engine. Return the most relevant factual information for the query.",
+    "symbolic_math": "You are a math solver. Compute the answer to the following math problem. Give only the numerical result.",
+    "execute_python": "You are a Python executor. Write and execute Python code to solve the following. Return the output.",
+    "database_query": "You are a database. Return the queried information.",
+    "read_document": "You are a document reader. Extract the relevant information from the document.",
+    "read_code": "You are a code analyst. Analyze the code and answer the question.",
+    "extract_field": "Extract the specific field or value requested.",
+    "parse_structured": "Parse the structured data and return the requested information.",
+    "fact_check": "Verify the following claim and state whether it is true or false with evidence.",
+    "call_api": "You are an API endpoint. Return the requested data.",
+    "execute_shell": "You are a shell executor. Run the command and return the output.",
+}
+
+
+def _get_api_client():
+    """Get or create the DashScope API client."""
+    api_key = os.environ.get("DASHSCOPE_API_KEY", "sk-70793c3ec75a40ca90b7076de9927260")
+    base_url = os.environ.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    return openai.OpenAI(api_key=api_key, base_url=base_url)
+
+
+def call_sub_agent_api(skill: str, query: str, question: str) -> Tuple[str, int]:
+    """
+    Call real LLM API as sub-agent.
+    Returns (response_text, output_tokens).
+    No CoT — direct answer only.
+    """
+    client = _get_api_client()
+    sys_prompt = SKILL_PROMPTS.get(skill, "Answer the following question concisely.")
+
+    try:
+        resp = client.chat.completions.create(
+            model="qwen-plus",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": f"Original question: {question}\n\nSub-task: {query}\n\nAnswer directly, no chain of thought."},
+            ],
+            max_tokens=256,
+            temperature=0.3,
+        )
+        text = resp.choices[0].message.content.strip()
+        output_tokens = resp.usage.completion_tokens
+        return text, output_tokens
+    except Exception as e:
+        return f"API error: {str(e)[:100]}", 0
 
 
 def normalize_answer(s: str) -> str:
-    """Normalize answer string for comparison."""
-    import string
     s = s.lower().strip()
-    # Remove articles
     for art in ("a ", "an ", "the "):
         if s.startswith(art):
             s = s[len(art):]
-    # Remove punctuation
     s = s.translate(str.maketrans("", "", string.punctuation))
-    # Collapse whitespace
     s = " ".join(s.split())
     return s
 
 
 def check_correctness(prediction: str, gold: str) -> float:
-    """Check if prediction matches gold answer. Returns 1.0 or 0.0."""
     if not prediction or not gold:
         return 0.0
     pred_norm = normalize_answer(prediction)
     gold_norm = normalize_answer(gold)
     if pred_norm == gold_norm:
         return 1.0
-    # Substring match (gold in pred or pred in gold)
     if gold_norm in pred_norm or pred_norm in gold_norm:
         return 1.0
     return 0.0
-
-
-def simulate_sub_agent(subtask_id: str, model: str, skill: str, query: str,
-                       question: str, gold: str) -> str:
-    """
-    Simulate sub-agent execution. Returns an <obs> string.
-
-    In RL training, we don't actually call external APIs.
-    Instead, we return a plausible observation based on the skill type.
-    The reward comes from whether the final_answer is correct.
-    """
-    # Simple simulation: return a generic observation
-    # The model must learn to produce correct final_answer regardless
-    if skill == "direct_answer":
-        obs = f"Based on parametric knowledge: [response to '{query}']"
-    elif skill == "web_search":
-        obs = f"Search results for '{query}': [relevant information retrieved]"
-    elif skill == "symbolic_math":
-        obs = f"Computation result for '{query}': [calculated value]"
-    elif skill == "execute_python":
-        obs = f"Python execution output for '{query}': [code output]"
-    elif skill == "reason":
-        obs = f"Reasoning result for '{query}': [logical conclusion]"
-    elif skill == "database_query":
-        obs = f"Database query result for '{query}': [query results]"
-    elif skill == "read_document":
-        obs = f"Document content for '{query}': [extracted text]"
-    elif skill == "fact_check":
-        obs = f"Fact check for '{query}': [verification result]"
-    elif skill == "extract_field":
-        obs = f"Extracted field for '{query}': [field value]"
-    else:
-        obs = f"Result for '{query}': [output]"
-    return obs
 
 
 class SingleSkillRouterEnv:
@@ -107,7 +150,8 @@ class SingleSkillRouterEnv:
         self.data_source = None
         self.max_turns = 3
         self.current_round = 0
-        self.total_route_tokens = 0
+        self.total_api_cost = 0.0
+        self.total_output_tokens = 0
         self.done = False
         self.final_answer = None
 
@@ -117,26 +161,18 @@ class SingleSkillRouterEnv:
         self.data_source = extras.get("data_source", "unknown")
         self.max_turns = extras.get("max_turns", 3)
         self.current_round = 0
-        self.total_route_tokens = 0
+        self.total_api_cost = 0.0
+        self.total_output_tokens = 0
         self.done = False
         self.final_answer = None
 
     def step(self, action: str) -> Dict:
-        """
-        Process model's output (action) and return environment response.
-
-        The action is the full text generated by the model, which may contain:
-        - <plan> + <route> tags -> parse and simulate execution
-        - <verify> + <final_answer> -> episode ends
-        - <verify status="repair_needed"> + <plan> -> continue
-        - <final_answer> directly -> lazy mode, episode ends
-        """
         self.current_round += 1
         observations = []
         reward = 0.0
         metadata = {}
 
-        # Check for final_answer (lazy mode or after verify pass)
+        # Check for final_answer
         final_match = FINAL_RE.search(action)
         if final_match:
             self.final_answer = final_match.group(1).strip()
@@ -151,22 +187,29 @@ class SingleSkillRouterEnv:
                 "metadata": metadata,
             }
 
-        # Parse routes and simulate execution
+        # Parse routes and call real API
         routes = ROUTE_RE.findall(action)
         if routes:
             obs_parts = []
             for round_n, subtask_id, model, skill, query in routes:
-                # Estimate token cost (rough: len of query + len of obs)
-                self.total_route_tokens += len(query.split()) * 2
-                obs_text = simulate_sub_agent(subtask_id, model, skill, query,
-                                              self.question, self.gold)
-                obs_parts.append(f'<obs subtask="{subtask_id}">{obs_text}</obs>')
+                # Call real API
+                response_text, output_tokens = call_sub_agent_api(
+                    skill, query, self.question
+                )
+                self.total_output_tokens += output_tokens
+
+                # Compute cost using the ROUTED model's pricing (not qwen-plus actual cost)
+                # This is the cost the Router "would have paid" if using the real model
+                cost_per_m = MODEL_COST_PER_M_TOKENS.get(model, 10.0)
+                self.total_api_cost += cost_per_m * max(output_tokens, 1) / 1e6
+
+                obs_parts.append(f'<obs subtask="{subtask_id}">{response_text}</obs>')
             observations = [{"content": "\n".join(obs_parts)}]
 
-        # Check if max turns exceeded
+        # Max turns exceeded
         if self.current_round >= self.max_turns:
             self.done = True
-            reward = 0.0  # No final_answer produced
+            reward = 0.0
             metadata["timeout"] = True
 
         metadata["round"] = self.current_round
@@ -181,10 +224,7 @@ class SingleSkillRouterEnv:
 
 
 class SkillRouterMultiProcessEnv(gym.Env):
-    """
-    Vectorized SkillRouter environment.
-    Compatible with verl-agent's env interface.
-    """
+    """Vectorized SkillRouter environment with real API calls."""
 
     def __init__(
         self,
@@ -200,15 +240,15 @@ class SkillRouterMultiProcessEnv(gym.Env):
         self.batch_size = env_num * group_n
         self.is_train = is_train
         self.max_steps = env_config.max_steps if env_config else 3
-        self.lambda_cost = env_config.get("lambda_cost", 0.001) if env_config else 0.001
+        self.alpha = env_config.get("alpha", DEFAULT_ALPHA) if env_config else DEFAULT_ALPHA
 
         self.envs = [SingleSkillRouterEnv() for _ in range(self.batch_size)]
+        # More workers for parallel API calls
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(self.batch_size, 64)
+            max_workers=min(self.batch_size, 128)
         )
 
     def reset(self, kwargs: List[Dict]) -> Tuple[List[str], List[Dict]]:
-        """Reset all environments with (question, gold) pairs."""
         if len(kwargs) > self.batch_size:
             self.batch_size = len(kwargs)
             self.envs = [SingleSkillRouterEnv() for _ in range(self.batch_size)]
@@ -229,7 +269,7 @@ class SkillRouterMultiProcessEnv(gym.Env):
         return obs_list, info_list
 
     def step(self, actions: List[str]) -> Tuple[List[str], np.ndarray, np.ndarray, List[Dict]]:
-        """Step all environments with model actions."""
+        # Parallel API calls via thread pool
         results = list(self._executor.map(
             lambda args: args[0].step(args[1]),
             zip(self.envs, actions)
@@ -246,10 +286,11 @@ class SkillRouterMultiProcessEnv(gym.Env):
                 obs_content = result["observations"][0]["content"]
             next_obs.append(obs_content)
 
-            # Reward: correctness - lambda * token_cost
+            # Router-R1 reward
             correctness = result["reward"]
-            token_cost = self.envs[i].total_route_tokens / 1000.0  # normalize
-            rewards[i] = correctness - self.lambda_cost * token_cost
+            api_cost = self.envs[i].total_api_cost
+            r_cost = 1.0 - min(api_cost / MAX_EPISODE_COST, 1.0) if MAX_EPISODE_COST > 0 else 1.0
+            rewards[i] = (1 - self.alpha) * correctness + self.alpha * r_cost
 
             dones[i] = result["done"]
             info = result.get("metadata", {})

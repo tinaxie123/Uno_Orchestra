@@ -14,8 +14,8 @@ set -x
 ENGINE=${1:-vllm}
 
 # --- Data ---
-TRAIN_DATA="${TRAIN_DATA:-/home/xieht/data/sft/rl_train.parquet}"
-VAL_DATA="${VAL_DATA:-/home/xieht/data/sft/rl_val.parquet}"
+TRAIN_DATA="${TRAIN_DATA:-/home/xieht/data/sft/rl_train_v2.parquet}"
+VAL_DATA="${VAL_DATA:-/home/xieht/data/sft/rl_val_v2.parquet}"
 
 # --- Model (SFT warm-start) ---
 MODEL_PATH="${MODEL_PATH:-/home/xieht/data/sft/checkpoints/router_qwen25_7b_full_sft}"
@@ -40,7 +40,7 @@ test_freq=50
 
 # --- Env ---
 max_env_steps=3        # Max rounds (plan→obs→verify cycles)
-lambda_cost=0.001      # Cost penalty coefficient
+alpha=0.1              # Router-R1: R = (1-α)*R_outcome + α*R_cost
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export HYDRA_FULL_ERROR=1
@@ -99,7 +99,7 @@ python3 -m verl.trainer.main_ppo \
     env.seed=42 \
     env.max_steps=$max_env_steps \
     env.rollout.n=$group_size \
-    +env.skillrouter.lambda_cost=$lambda_cost \
+    +env.skillrouter.alpha=$alpha \
     reward_model.reward_manager=episode \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='skillrouter-rl' \
