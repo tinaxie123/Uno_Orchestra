@@ -86,6 +86,25 @@ SKILL_PROMPTS = {
 }
 
 
+# Map router's model pool → (DashScope model, max_tokens)
+# Different tiers get different models AND token budgets
+ROUTER_TO_DASHSCOPE = {
+    # nano tier → qwen-plus with low token budget (simulates weaker model)
+    "claude-haiku-4-5-20251001": ("qwen-plus", 64),
+    "gemini-2.5-flash": ("qwen-plus", 64),
+    # mid tier → qwen-plus with normal budget
+    "kimi-k2.5": ("qwen-plus", 256),
+    "claude-sonnet-4-6": ("qwen-plus", 256),
+    "gemini-3.1-pro-preview": ("qwen-plus", 256),
+    "qwen3.6-plus": ("qwen-plus", 256),
+    # large tier → qwen-max (strongest)
+    "claude-opus-4-6": ("qwen-max", 512),
+    "gpt-5.4": ("qwen-max", 512),
+    # code specialist → qwen-plus with code prompt
+    "gpt-5.3-codex": ("qwen-plus", 512),
+}
+
+
 def _get_api_client():
     """Get or create the DashScope API client."""
     api_key = os.environ.get("DASHSCOPE_API_KEY", "sk-70793c3ec75a40ca90b7076de9927260")
@@ -93,24 +112,26 @@ def _get_api_client():
     return openai.OpenAI(api_key=api_key, base_url=base_url)
 
 
-def call_sub_agent_api(skill: str, query: str, question: str) -> Tuple[str, int]:
+def call_sub_agent_api(model: str, skill: str, query: str, question: str) -> Tuple[str, int]:
     """
-    Call real LLM API as sub-agent.
+    Call real LLM API as sub-agent with model-tier mapping.
+    Different routed models → different DashScope models → different quality answers.
     Returns (response_text, output_tokens).
-    No CoT — direct answer only.
     """
     client = _get_api_client()
     sys_prompt = SKILL_PROMPTS.get(skill, "Answer the following question concisely.")
+    actual_model, max_tok = ROUTER_TO_DASHSCOPE.get(model, ("qwen-plus", 256))
 
     try:
         resp = client.chat.completions.create(
-            model="qwen-plus",
+            model=actual_model,
             messages=[
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": f"Original question: {question}\n\nSub-task: {query}\n\nAnswer directly, no chain of thought."},
             ],
-            max_tokens=256,
+            max_tokens=max_tok,
             temperature=0.3,
+            extra_body={"enable_thinking": False},
         )
         text = resp.choices[0].message.content.strip()
         output_tokens = resp.usage.completion_tokens
@@ -172,6 +193,24 @@ class SingleSkillRouterEnv:
         reward = 0.0
         metadata = {}
 
+        # Format validation: must contain <final_answer> OR (<plan> + <route>)
+        has_final = bool(FINAL_RE.search(action))
+        has_plan = bool(PLAN_RE.search(action))
+        has_route = bool(ROUTE_RE.search(action))
+        format_valid = has_final or (has_plan and has_route)
+        metadata["format_valid"] = format_valid
+
+        if not format_valid:
+            # Invalid format → done, no reward
+            self.done = True
+            metadata["format_error"] = True
+            return {
+                "observations": observations,
+                "reward": 0.0,
+                "done": True,
+                "metadata": metadata,
+            }
+
         # Check for final_answer
         final_match = FINAL_RE.search(action)
         if final_match:
@@ -180,6 +219,7 @@ class SingleSkillRouterEnv:
             reward = check_correctness(self.final_answer, self.gold)
             metadata["correctness"] = reward
             metadata["final_answer"] = self.final_answer
+            metadata["format_valid"] = True
             return {
                 "observations": observations,
                 "reward": reward,
@@ -194,7 +234,7 @@ class SingleSkillRouterEnv:
             for round_n, subtask_id, model, skill, query in routes:
                 # Call real API
                 response_text, output_tokens = call_sub_agent_api(
-                    skill, query, self.question
+                    model, skill, query, self.question
                 )
                 self.total_output_tokens += output_tokens
 
@@ -286,16 +326,26 @@ class SkillRouterMultiProcessEnv(gym.Env):
                 obs_content = result["observations"][0]["content"]
             next_obs.append(obs_content)
 
-            # Router-R1 reward
+            # Router-R1 hierarchical reward:
+            # R = R_format + (1-α)*R_outcome + α*R_cost
+            # If format invalid → R_outcome and R_cost are nullified
             correctness = result["reward"]
-            api_cost = self.envs[i].total_api_cost
-            r_cost = 1.0 - min(api_cost / MAX_EPISODE_COST, 1.0) if MAX_EPISODE_COST > 0 else 1.0
-            rewards[i] = (1 - self.alpha) * correctness + self.alpha * r_cost
+            is_valid = result.get("metadata", {}).get("format_valid", True)
+
+            if not is_valid:
+                # Format reward = -1, nullify everything else
+                rewards[i] = -1.0
+            else:
+                # Format OK → compute outcome + cost
+                api_cost = self.envs[i].total_api_cost
+                r_cost = 1.0 - min(api_cost / MAX_EPISODE_COST, 1.0) if MAX_EPISODE_COST > 0 else 1.0
+                rewards[i] = (1 - self.alpha) * correctness + self.alpha * r_cost
 
             dones[i] = result["done"]
             info = result.get("metadata", {})
             info["data_source"] = self.envs[i].data_source
             info["won"] = bool(correctness >= 1.0)
+            info["format_valid"] = is_valid
             infos.append(info)
 
         return next_obs, rewards, dones, infos
