@@ -21,6 +21,10 @@
 !agent_system/
 !agent_system/**
 
+# Keep eval pipeline.
+!eval_pipeline/
+!eval_pipeline/**
+
 # Keep data configs (not actual data files).
 !data/
 !data/*.yaml
@@ -32,3 +36,4 @@
 .idea/
 *.swp
 *.swo
+__pycache__/
