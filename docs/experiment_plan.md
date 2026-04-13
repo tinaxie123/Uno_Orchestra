@@ -29,19 +29,25 @@ Train/val source overlap: **0**.
 
 ### 1.3 Evaluation Benchmarks (ALL held out)
 
-**Primary** (main table):
-
-| Benchmark | Tests |
-|-----------|-------|
-| SWE-bench Verified | Repository-level bug fixing (500 instances) |
-| Terminal-Bench 2.0 | Execution-heavy coding (89 tasks) |
-| GAIA | Long-horizon multi-tool reasoning |
-| BrowseComp-Plus | Deep-research with fixed retrieval |
-| ToolBench | Tool routing and function selection |
-
-**Secondary**: DeepResearch Bench, Toolathlon, MRCR v2, LiveCodeBench, WideSearch.
-
-**Supporting**: AIME, AMC, GSM-Hard, GPQA, MMLU, MBPP, HumanEval.
+| Benchmark | Domain | Instances |
+|-----------|--------|-----------|
+| SWE-bench Verified | Repository-level bug fixing | 500 |
+| Terminal-Bench 2.0 | Execution-heavy coding | 89 |
+| GAIA | Long-horizon multi-tool reasoning | 165 |
+| BrowseComp-Plus | Deep-research with fixed retrieval | — |
+| ToolBench | Tool routing and function selection | — |
+| WideSearch | Parallel decomposition | — |
+| DeepResearch Bench | Multi-step research | — |
+| Toolathlon | Tool use | — |
+| MRCR v2 | Multi-round context reasoning | — |
+| LiveCodeBench | Code generation (live) | — |
+| AIME | Math (competition) | 30 |
+| AMC | Math (competition) | 25 |
+| GSM-Hard | Math (grade school, hard) | 1319 |
+| GPQA | Graduate-level QA | 448 |
+| MMLU | Multi-domain knowledge | 14042 |
+| MBPP | Code generation | 500 |
+| HumanEval | Code generation | 164 |
 
 ---
 
