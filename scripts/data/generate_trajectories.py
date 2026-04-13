@@ -21,8 +21,8 @@ Usage
 
 Environment
 -----------
-    XIAOJING_API_KEY  : the OpenAI-compatible API key
-    XIAOJING_BASE_URL : default https://open.xiaojingai.com/v1/
+    API_KEY           : the OpenAI-compatible API key
+    API_BASE_URL      : default http://localhost:9000/v1
 
 Outputs
 -------
@@ -64,7 +64,7 @@ RECIPE_PATH = os.path.join(REPO_ROOT, "config/sft_recipe.yaml")
 POOLS_PATH = os.path.join(REPO_ROOT, "config/pools.yaml")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "data/sft")
 
-DEFAULT_BASE_URL = os.environ.get("XIAOJING_BASE_URL", "https://open.xiaojingai.com/v1/")
+DEFAULT_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:9000/v1")
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 4096
@@ -119,13 +119,9 @@ BEHAVIOR_ONESHOT = "oneshot"
 BEHAVIOR_CONTINUATION = "continuation"
 BEHAVIOR_DECOMP_REPAIR = "decomp_repair"
 
-# Per-1M-token costs (USD) for cost meter, calibrated against the
-# xiaojingai endpoint pricing page (CNY/USD ≈ 7.16). Approximate.
-# These are NOT the upstream provider's official prices (xiaojingai's
-# proxy is ~50x cheaper for Anthropic models), so do not reuse this
-# table for billing reconciliation against direct API contracts.
+# Per-1M-token costs (USD) for cost meter. Approximate.
 COST_TABLE = {
-    # Anthropic (verified from xiaojingai pricing page 2026-04-09)
+    # Anthropic
     "claude-opus-4-6":              {"in": 0.314, "out": 1.571},   # ¥2.25/¥11.25
     # NOTE: -thinking variants NOT used. CoT is not a router skill.
     "claude-sonnet-4-6":            {"in": 0.189, "out": 0.943},   # ¥1.35/¥6.75
@@ -955,15 +951,15 @@ def main() -> int:
     parser.add_argument("--concurrency", type=int, default=20, help="max parallel API calls for --full mode")
     parser.add_argument("--only", default=None, help="distill from a single dataset by name")
     parser.add_argument("--n", type=int, default=1, help="number of samples per --only dataset")
-    parser.add_argument("--api-key", default=None, help="overrides XIAOJING_API_KEY")
+    parser.add_argument("--api-key", default=None, help="overrides API_KEY")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     random.seed(args.seed)
-    api_key = args.api_key or os.environ.get("XIAOJING_API_KEY")
+    api_key = args.api_key or os.environ.get("API_KEY")
     if not api_key:
-        print("ERROR: set XIAOJING_API_KEY env var or pass --api-key", file=sys.stderr)
+        print("ERROR: set API_KEY env var or pass --api-key", file=sys.stderr)
         return 2
 
     from openai import OpenAI  # noqa: WPS433

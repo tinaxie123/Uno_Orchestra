@@ -33,7 +33,7 @@ SKILLS = [
 ]
 
 # Eval defaults
-DEFAULT_API_BASE = "https://open.xiaojingai.com/v1/"
+DEFAULT_API_BASE = "http://localhost:9000/v1"  # External API endpoint
 DEFAULT_LOCAL_BASE = "http://localhost:8000/v1"
 EVAL_MAX_TOKENS = 4096
 SUB_AGENT_TEMP = 0.3

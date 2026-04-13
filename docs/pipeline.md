@@ -47,7 +47,7 @@ Generates SFT trajectories by calling a teacher model (claude-sonnet-4-6, claude
 
 ```bash
 # Environment variables
-export XIAOJING_API_KEY="sk-..."        # OpenAI-compatible API key
+export API_KEY="sk-..."                # OpenAI-compatible API key
 export HF_TOKEN="hf_..."               # HuggingFace token (faster downloads)
 export HF_ENDPOINT="https://hf-mirror.com"  # Optional: Chinese mirror
 

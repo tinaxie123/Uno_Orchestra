@@ -105,7 +105,7 @@ eval_pipeline/
 | GPU 2 (H100 80GB) | vLLM: SkillRouter-SFT (7B), port 8000 |
 | GPU 3 (H100 80GB) | vLLM: Qwen2.5-7B-Instruct (base), port 8001 |
 | Docker | 24 containers active (Terminal-Bench verification) |
-| API (xiaojingai) | 12 eval processes, ~16 concurrent workers each |
+| API (external API) | 12 eval processes, ~16 concurrent workers each |
 
 ### 4.2 Model Checkpoints
 
@@ -153,7 +153,7 @@ The SFT model uses schema v1.1 (multi-turn):
 [ASSISTANT] <verify round="1" status="pass"> <final_answer>...
 ```
 
-Sub-agent calls use real API models via xiaojingai (not DashScope proxy).
+Sub-agent calls use real API models via external API (not DashScope proxy).
 This matches the eval protocol in experiment_plan_v3.md §5.3.
 
 ### 5.3 Fair Comparison Principles

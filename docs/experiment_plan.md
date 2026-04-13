@@ -1,16 +1,6 @@
-# Experiment Plan v5 (Supersedes v4)
+# Experiment Plan
 
 **Target**: NeurIPS 2026
-
----
-
-## 0. Hard Rule — Data Contamination Policy
-
-**Any benchmark family used in evaluation MUST NOT appear in any training stage** — neither SFT, nor RL, nor distillation prompts.
-
-- SFT data, RL prompt pool, and eval benchmarks have ZERO overlap (verified at source level)
-- 13-gram decontamination run after every distillation batch
-- RL train/val split at SOURCE level (no source appears in both)
 
 ---
 
@@ -222,7 +212,7 @@ eval_pipeline/
 1. Load checkpoint (SFT or RL)
 2. For each benchmark query:
    - Generate trajectory with greedy decoding (temperature=0 for router, 0.3 for sub-agents)
-   - Execute routes via real API calls (xiaojingai endpoint)
+   - Execute routes via real API calls (external API endpoint)
    - Compute correctness + cost
 3. Verify:
    - **SWE-bench**: official `swebench.harness.run_evaluation` (batch Docker apply + test)
@@ -252,7 +242,7 @@ eval_pipeline/
 - GPU 2: vLLM serving SkillRouter-SFT (7B), port 8000
 - GPU 3: vLLM serving Qwen2.5-7B-Instruct (base), port 8001
 - Docker: 24+ containers active for Terminal-Bench verification
-- API: 12 eval processes concurrent via xiaojingai
+- API: 12 eval processes concurrent via external API
 
 ---
 
@@ -334,7 +324,7 @@ Required for NeurIPS. Each ablation changes ONE variable, keeping all else fixed
 |-------|------|----------|----------|
 | D (SFT) | 4x H100 | 7h | -- |
 | E (RL, 100 steps) | 7x H100 | ~8h | ~360 CNY (DashScope) |
-| F (Eval, all baselines) | 2x H100 | ~12h | ~500 CNY (xiaojingai) |
+| F (Eval, all baselines) | 2x H100 | ~12h | ~500 CNY (external API) |
 | G (Ablations, 5 runs) | 7x H100 | ~40h | ~1,800 CNY |
 | **Total** | | ~67h | ~2,660 CNY |
 
