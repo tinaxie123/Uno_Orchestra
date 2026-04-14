@@ -22,7 +22,6 @@ Sources: HotpotQA, 2WikiMultihopQA, MuSiQue, StrategyQA, NQ Open, TriviaQA, WebQ
 | Math (competition) | DAPO (Open-AgentRL) | 2,854 | -- |
 | Math (mixed) | NuminaMath-CoT (excl. gsm8k/math) | 639 | numinamath_cn_k12: 516 (val only) |
 | Code | TACO + LeetCode-Easy/Hard | 2,505 | LeetCode-Medium: 71 (val only) |
-| Science | mega-science (Open-AgentRL) | 1,903 | -- |
 | **Total** | | **7,901** | **3,422** |
 
 Train/val source overlap: **0**.
