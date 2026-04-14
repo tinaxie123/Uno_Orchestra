@@ -121,13 +121,23 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
     need_gen = [t for t in tasks if t.task_id not in predictions]
     need_verify = [t for t in tasks if t.task_id not in verification]
 
-    if bench.name == "SWE-bench_Verified":
+    # Check if router supports interactive mode (has local LLM + schema)
+    is_interactive = (hasattr(router, 'local') and hasattr(router, 'model_name')
+                      and bench.name == "Terminal-Bench-2.0"
+                      and args.interactive)
+
+    if is_interactive:
+        # Interactive mode: router ↔ Docker multi-turn loop
+        _run_interactive(router, bench, tasks, need_verify,
+                         predictions, verification, pred_file, verify_file,
+                         logs_dir, args)
+    elif bench.name == "SWE-bench_Verified":
         # SWE-bench: generate all → batch harness verification (official method)
         _run_sequential(router, bench, tasks, need_gen, need_verify,
                         predictions, verification, pred_file, verify_file,
                         logs_dir, args)
     else:
-        # TerminalBench: pipeline (generate + Docker verify concurrently)
+        # TerminalBench one-shot: pipeline (generate + Docker verify concurrently)
         _run_pipelined(router, bench, tasks, need_gen, need_verify,
                        predictions, verification, pred_file, verify_file,
                        logs_dir, args)
@@ -163,6 +173,43 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
     print(f"  Output: {out}")
     print(f"{'='*60}")
     return summary
+
+
+def _run_interactive(router, bench, tasks, need_verify,
+                     predictions, verification, pred_file, verify_file,
+                     logs_dir, args):
+    """Interactive mode: router ↔ Docker multi-turn for each task."""
+    to_run = [t for t in tasks if t.task_id not in verification]
+    if not to_run:
+        print("Interactive: all tasks already verified")
+        return
+
+    print(f"Interactive mode: {len(to_run)} tasks (workers={args.verify_workers})")
+
+    lock = threading.Lock()
+    with open(verify_file, "a") as vout, open(pred_file, "a") as pout:
+        with ThreadPoolExecutor(max_workers=args.verify_workers) as ex:
+            futs = {ex.submit(bench.interactive_verify, t, router, logs_dir): t
+                    for t in to_run}
+            for fut in tqdm(as_completed(futs), total=len(to_run), desc="Interactive"):
+                task = futs[fut]
+                vr = fut.result()
+                d = {"task_id": vr.task_id, "reward": vr.reward,
+                     "error": vr.error, "log": vr.log[:500]}
+                # Also save a prediction entry for consistency
+                pred_entry = {"task_id": vr.task_id, "answer": "(interactive)",
+                              "route_count": 0, "routed_models": [], "cost": 0}
+                with lock:
+                    verification[vr.task_id] = d
+                    vout.write(json.dumps(d) + "\n")
+                    vout.flush()
+                    if vr.task_id not in predictions:
+                        predictions[vr.task_id] = pred_entry
+                        pout.write(json.dumps(pred_entry) + "\n")
+                        pout.flush()
+                status = "PASS" if vr.reward > 0 else "FAIL"
+                err = f" ({vr.error})" if vr.error else ""
+                tqdm.write(f"  {vr.task_id}: {status}{err}")
 
 
 def _run_sequential(router, bench, tasks, need_gen, need_verify,
@@ -322,6 +369,8 @@ def main():
     parser.add_argument("--skip_verify", action="store_true")
     parser.add_argument("--direct_model", default=None, help="API model for direct router")
     parser.add_argument("--local_model", default=None, help="Local vLLM model name")
+    parser.add_argument("--interactive", action="store_true",
+                        help="Interactive mode: router ↔ Docker multi-turn (TerminalBench only)")
     args = parser.parse_args()
 
     if not args.output_dir:

@@ -23,7 +23,7 @@ Question: {question}
 
 # Display name → API model ID
 _NAME_MAP = {
-    "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+    "claude-haiku-4.5": "gemini-2.5-flash",  # haiku channel down, fallback to same-tier nano model
     "gemini-2.5-flash": "gemini-2.5-flash",
     "kimi-k2.5": "kimi-k2.5",
     "claude-sonnet-4.6": "claude-sonnet-4-6",

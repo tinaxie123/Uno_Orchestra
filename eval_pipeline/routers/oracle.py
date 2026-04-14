@@ -4,7 +4,7 @@ Tests: "Does routing beat always picking the best/cheapest model?"
 """
 import openai
 from .base import BaseRouter, RouteResult
-from ..config import COST_PER_M, EVAL_MAX_TOKENS, DEFAULT_API_BASE
+from ..config import COST_PER_M, EVAL_MAX_TOKENS, DEFAULT_API_BASE, resolve_model
 
 
 class OracleRouter(BaseRouter):
@@ -21,9 +21,10 @@ class OracleRouter(BaseRouter):
         return self._label
 
     def route(self, question: str, context: dict = None) -> RouteResult:
+        actual = resolve_model(self.model_id)
         try:
             r = self.api.chat.completions.create(
-                model=self.model_id,
+                model=actual,
                 messages=[{"role": "user", "content": question}],
                 temperature=0.0, max_tokens=EVAL_MAX_TOKENS,
             )
@@ -36,15 +37,11 @@ class OracleRouter(BaseRouter):
             return RouteResult(answer=f"Error: {e}", route_count=1, routed_models=[self.model_id])
 
 
-# Pre-configured baselines
 def cheapest_router(**kw):
-    """Always use claude-haiku (cheapest in pool)."""
     return OracleRouter("claude-haiku-4-5-20251001", "Cheapest(haiku)", **kw)
 
 def strongest_router(**kw):
-    """Always use claude-opus (strongest in pool)."""
     return OracleRouter("claude-opus-4-6", "Strongest(opus)", **kw)
 
 def codex_router(**kw):
-    """Always use gpt-5.3-codex (code specialist)."""
     return OracleRouter("gpt-5.3-codex", "Codex-Only", **kw)

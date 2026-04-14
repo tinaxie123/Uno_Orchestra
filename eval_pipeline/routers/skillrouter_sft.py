@@ -6,7 +6,7 @@ import re
 import openai
 from .base import BaseRouter, RouteResult
 from ..config import (COST_PER_M, EVAL_MAX_TOKENS, SUB_AGENT_TEMP,
-                      DEFAULT_LOCAL_BASE, DEFAULT_API_BASE, SKILLS)
+                      DEFAULT_LOCAL_BASE, DEFAULT_API_BASE, SKILLS, resolve_model)
 
 # Skill → system prompt (same as envs.py SKILL_PROMPTS)
 SKILL_PROMPTS = {
@@ -63,9 +63,10 @@ class SkillRouterSFT(BaseRouter):
     def _call_sub_agent(self, model: str, skill: str, query: str, question: str):
         """Call real API as sub-agent, same as envs.py."""
         sys_prompt = SKILL_PROMPTS.get(skill, "Answer the following question concisely.")
+        actual_model = resolve_model(model)
         try:
             resp = self.api.chat.completions.create(
-                model=model,
+                model=actual_model,
                 messages=[
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": f"Original question: {question}\n\nSub-task: {query}\n\nAnswer directly."},

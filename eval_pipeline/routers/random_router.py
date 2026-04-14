@@ -5,7 +5,7 @@ Tests: "Does learned routing beat random?"
 import random
 import openai
 from .base import BaseRouter, RouteResult
-from ..config import MODEL_POOL, COST_PER_M, EVAL_MAX_TOKENS, SUB_AGENT_TEMP, DEFAULT_API_BASE
+from ..config import MODEL_POOL, COST_PER_M, EVAL_MAX_TOKENS, SUB_AGENT_TEMP, DEFAULT_API_BASE, resolve_model
 
 
 class RandomRouter(BaseRouter):
@@ -21,9 +21,10 @@ class RandomRouter(BaseRouter):
 
     def route(self, question: str, context: dict = None) -> RouteResult:
         mid = self.rng.choice(MODEL_POOL)
+        actual = resolve_model(mid)
         try:
             r = self.api.chat.completions.create(
-                model=mid,
+                model=actual,
                 messages=[{"role": "user", "content": question}],
                 temperature=SUB_AGENT_TEMP, max_tokens=EVAL_MAX_TOKENS,
             )

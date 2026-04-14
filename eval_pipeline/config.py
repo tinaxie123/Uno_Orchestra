@@ -39,5 +39,17 @@ EVAL_MAX_TOKENS = 4096
 SUB_AGENT_TEMP = 0.3
 
 
+# Fallback for unavailable models (same tier replacement)
+MODEL_FALLBACK = {
+    "claude-haiku-4-5-20251001": "gemini-2.5-flash",  # nano -> nano
+}
+
+
+def resolve_model(model_id: str) -> str:
+    """Return the model ID, falling back if the model is known to be unavailable."""
+    return MODEL_FALLBACK.get(model_id, model_id)
+
+
 def compute_cost(model_id: str, output_tokens: int) -> float:
+    """Compute cost using the ORIGINAL model's pricing (not fallback)."""
     return COST_PER_M.get(model_id, 10.0) * max(output_tokens, 1) / 1e6
