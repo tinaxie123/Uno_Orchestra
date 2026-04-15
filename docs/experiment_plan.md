@@ -1,24 +1,57 @@
-# Experiment Plan
+### 🍬Data Source Pool Construction 
 
-**Target**: NeurIPS 2026
+**🍰 Data Source pool construction.** 
 
----
+A router must learn **when** and **how** to decompose a task. According to the capability taxonomy of general AI assistants (Mialon et al., 2024), we organize our data along four dimensions reflecting different decomposition patterns: 
 
-## 1. Data
+🍓**reasoning**, where a problem must be broken into a chain of inferential or computational steps;  
 
-### 1.1 SFT Training Data
+🥭**knowledge retrieval**, where the router issues parallel or sequential queries to gather information from multiple sources; 
 
-58,457 distilled trajectories across 9 domains, schema v1.1 validated.
+🍊**tool use**, where sub-tasks involve heterogeneous operations such as code execution or API calls;
 
-Sources: HotpotQA, 2WikiMultihopQA, MuSiQue, StrategyQA, NQ Open, TriviaQA, WebQuestions, GSM8K, MATH, TheoremQA, AQuA-RAT, APPS, CodeContests, SciQ, ARC-Challenge, OpenBookQA, MMLU (STEM), CommonsenseQA, PIQA, Social IQA, Winogrande, LogiQA 2.0, FOLIO, BBH, QuALITY, LegalBench, FinQA, ToolACE.
+🍑**multi-step planning**, where intermediate results shape subsequent actions.   
 
-### 1.2 RL Training Data
+
+We select a minimal set of sources such that each of the four dimensions is covered by at least one dataset, and every source contributes a decomposition pattern not provided by the others. Starting from an initial pool of 7 widely-used datasets spanning 5 domains, we apply two inclusion criteria to ensure each source provides meaningful signal for router training: 
+(i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model, and multi-step tasks where it must decompose the problem into dependent sub-tasks;
+(ii) gold answers must be automatically verifiable to enable scalable filtering; 
+
+This yields approximately 12K tasks from the following sources:
+
+- DAPO-Math-17k (Yu et al., 2025) and NuminaMath-CoT (Li et al., 2024) mathematical reasoning from K-12 through olympiad
+- DROP, train spilt(Dua et al., 2019)  span extraction and arithmetic over paragraphs
+- HotpotQA (Yang et al., 2018), train split — multi-hop question answering
+- TACO (Li et al., 2023) LeetCode— code generation
+- ToolACE (Liu et al., 2024) — multi-step tool orchestration involving API chaining and sequential planning
+
+### 🍭Data Selection Pipeline
+
+We emply **bootstrapped curriculum filtering** on raw question sets from training data pools for supervised fine-tuning and reinforcement learning to ensure the training set consists entirely of router's capability gaps. 
+
+### 🍒Bootstrapped curriculum filtering
+
+*Stage 1: Router probe.* We run the current router checkpoint on every task in the pool with real sub-model execution — the router decomposes the task, delegates sub-tasks to actual models, and produces a final answer. We evaluate each task via pass\@3 and check against the gold label. Tasks the router already solves correctly are discarded, as they carry no learning signal.
+
+*Stage 2: Teacher trajectory collection and SFT/RL split.* For each remaining task — where the router failed — we run a strong teacher orchestrator with the same model pool. If the teacher produces a correct trajectory, the task enters the SFT set as a demonstration for imitation learning. If the teacher also fails, the task enters the RL set, where the router must discover a working decomposition through its own exploration.
+
+*Stage 3: Overlong filtering.* Following the overlong filtering strategy of DAPO (Yu et al., 2025), we discard any trajectory whose token count exceeds the training context length. Truncated trajectories teach the model to produce incomplete decompositions; removing them allows the model to generalize to longer reasoning chains at inference time without incurring penalties from truncation during training.
+
+This pipeline is self-adaptive: it can be re-applied after each training round to produce a curriculum of increasing difficulty, as the router's capability boundary shifts with training.
+
+
+### 🧸SFT Training Data
+
+
+
+
+### ☁️ RL Training Data
 
 12,000 samples from sources NOT in SFT. Split by source:
 
 | Domain | Source | Train | Val (held-out source) |
-|--------|--------|-------|-----------------------|
-| QA/Reasoning | DROP | -- | 2,835 (val only) |
+|--------|--------|-------|-----------------------| 
+| QA/Reasoning | DROP MuSiQue   | -- | 2,835 (val only) |
 | Math (competition) | DAPO (Open-AgentRL) | 2,854 | -- |
 | Math (mixed) | NuminaMath-CoT (excl. gsm8k/math) | 639 | numinamath_cn_k12: 516 (val only) |
 | Code | TACO + LeetCode-Easy/Hard | 2,505 | LeetCode-Medium: 71 (val only) |
@@ -26,9 +59,9 @@ Sources: HotpotQA, 2WikiMultihopQA, MuSiQue, StrategyQA, NQ Open, TriviaQA, WebQ
 
 Train/val source overlap: **0**.
 
-### 1.3 Evaluation Benchmarks
+### 🍦Evaluation Benchmarks
 
-| Benchmark | Domain | Instances |
+| Benchmark |
 |-----------|--------|-----------|
 | SWE-bench Verified | Repository-level bug fixing | 500 |
 | Terminal-Bench 2.0 | Execution-heavy coding | 89 |
@@ -37,12 +70,12 @@ Train/val source overlap: **0**.
 | ToolBench | Tool routing and function selection | -- |
 | WideSearch | Parallel decomposition | -- |
 | DeepResearch Bench | Multi-step research | -- |
-| Toolathlon | Tool use | -- |
+
 | MRCR v2 | Multi-round context reasoning | -- |
-| LiveCodeBench | Code generation (live) | -- |
-| AIME | Math (competition) | 30 |
-| AMC | Math (competition) | 25 |
-| GSM-Hard | Math (grade school, hard) | 1319 |
+| LiveCodeBench v6| Code generation (live) | -- |
+| AIME 2025| 
+| MATH 500 | 
+| DROP test | 
 | GPQA | Graduate-level QA | 448 |
 | MMLU | Multi-domain knowledge | 14042 |
 | MBPP | Code generation | 500 |
