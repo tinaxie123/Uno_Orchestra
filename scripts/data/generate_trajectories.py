@@ -1,35 +1,30 @@
 from __future__ import annotations
-
 import argparse
 import json
 import os
 import random
 import re
 import sys
-
 from collections import defaultdict
-
 import yaml
 from tqdm import tqdm
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 sys.path.insert(0, REPO_ROOT)
-from configs import load_pools  # single source of truth
-
+from configs import PoolConfig, load_pools
 RECIPE_PATH = os.path.join(REPO_ROOT, "configs/sft/data/sft_recipe.yaml")
 POOLS_PATH = os.path.join(REPO_ROOT, "configs/pools.yaml")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "data/sft")
 
 MAX_STEPS = 8
-MAX_TRAINING_TOKENS = 8192  # must match build_dataset.py MAX_TOKENS / SFT cutoff_len
+MAX_TRAINING_TOKENS = 8192
 ROUTER_PASS_K = 3
-
 
 def load_recipe(path: str) -> list[dict]:
     with open(path) as f:
         return yaml.safe_load(f)["datasets"]
 
-def build_system_prompt(pools: dict) -> str:
+def build_system_prompt(pools: PoolConfig) -> str:
     model_list = ", ".join(pools["models"])
     skill_list = ", ".join(pools["skills"])
     skill_lines = []
@@ -51,7 +46,7 @@ You have two tools:
 Think step by step. Pick the cheapest model that can handle each sub-task. When you have enough information, call finish."""
 
 
-def build_tools(pools: dict) -> list[dict]:
+def build_tools(pools: PoolConfig) -> list[dict]:
     return [
         {"type": "function", "function": {
             "name": "delegate_task",
@@ -78,7 +73,7 @@ def run_agent(
     api_key: str,
     sub_model_api_base: str,
     sub_model_api_key: str,
-    pools: dict,
+    pools: PoolConfig,
     temperature: float = 0.3,
 ) -> dict:
     from openai import OpenAI
@@ -92,7 +87,7 @@ def run_agent(
         {"role": "user", "content": question},
     ]
 
-    n_steps = 0
+    n_delegates = 0
     answer = None
     complete = False
     models_used = []
@@ -122,7 +117,7 @@ def run_agent(
                                      "content": json.dumps({"status": "done"})})
                     break
                 elif name == "delegate_task":
-                    n_steps += 1
+                    n_delegates += 1
                     models_used.append(args.get("model", pools["models"][0]))
                     skills_used.append(args.get("skill", "direct_answer"))
                     try:
@@ -143,7 +138,7 @@ def run_agent(
             break
 
     return {"messages": messages, "answer": answer, "complete": complete,
-            "n_steps": n_steps, "models_used": models_used, "skills_used": skills_used}
+            "n_delegates": n_delegates, "models_used": models_used, "skills_used": skills_used}
 
 def fuzzy_match(pred: str, gold: str) -> bool:
     if not pred or not gold:
@@ -191,13 +186,63 @@ def to_sharegpt(messages: list[dict]) -> list[dict]:
     return conversations
 
 
+def estimate_tokens(messages: list[dict]) -> int:
+    return sum(len(str(message.get("content", ""))) for message in messages) // 3
+
+
+def stage1_router_probe(question: str, gold: str, args: argparse.Namespace, pools: PoolConfig) -> bool:
+    for _ in range(ROUTER_PASS_K):
+        result = run_agent(
+            question,
+            args.router_model,
+            args.router_api_base,
+            args.router_api_key,
+            args.sub_model_api_base,
+            args.sub_model_api_key,
+            pools,
+            temperature=0.7,
+        )
+        if result["complete"] and fuzzy_match(result["answer"], gold):
+            return True
+    return False
+
+
+def stage2_teacher_run(question: str, gold: str, args: argparse.Namespace, pools: PoolConfig) -> tuple[bool, dict]:
+    result = run_agent(
+        question,
+        args.teacher_model,
+        args.teacher_api_base,
+        args.teacher_api_key,
+        args.sub_model_api_base,
+        args.sub_model_api_key,
+        pools,
+        temperature=0.3,
+    )
+    return result["complete"] and fuzzy_match(result["answer"], gold), result
+
+
+def stage3_filter_and_pack(task: dict, teacher_result: dict) -> tuple[bool, dict | None]:
+    est_tokens = estimate_tokens(teacher_result["messages"])
+    if est_tokens > MAX_TRAINING_TOKENS:
+        return False, None
+    return True, {
+        "conversations": to_sharegpt(teacher_result["messages"]),
+        "source": task["source"],
+        "domain": task["domain"],
+        "gold_answer": task["gold_answer"],
+        "n_delegates": teacher_result["n_delegates"],
+        "models_used": teacher_result["models_used"],
+        "skills_used": teacher_result["skills_used"],
+    }
+
+
 def load_question_pool(recipe: list[dict]) -> list[dict]:
     from datasets import load_dataset
 
     all_tasks = []
     for entry in recipe:
         name = entry["name"]
-        n = entry.get("n_samples")  # None = load all
+        n = entry.get("n_samples")
         print(f"  Loading {name} (n={'all' if n is None else n})...", end=" ", flush=True)
         try:
             kw = {"split": entry["split"]}
@@ -286,7 +331,6 @@ def main() -> int:
     rl_path = os.path.join(args.out_dir, "rl.jsonl")
     report_path = os.path.join(args.out_dir, "curriculum_report.json")
 
-    tools_json = json.dumps(build_tools(pools), ensure_ascii=False)  # same for every sample
     sft_data, rl_data = [], []
     stats = {"total": len(all_tasks), "router_ok": 0, "sft": 0, "rl": 0, "overlong": 0,
              "per_source": defaultdict(lambda: {"total": 0, "router_ok": 0, "sft": 0, "rl": 0})}
@@ -295,37 +339,25 @@ def main() -> int:
         q, gold, src = task["question"], task["gold_answer"], task["source"]
         stats["per_source"][src]["total"] += 1
 
-        router_ok = False
-        for _ in range(ROUTER_PASS_K):
-            r = run_agent(q, args.router_model, args.router_api_base, args.router_api_key,
-                          args.sub_model_api_base, args.sub_model_api_key, pools, temperature=0.7)
-            if r["complete"] and fuzzy_match(r["answer"], gold):
-                router_ok = True
-                break
+        router_ok = stage1_router_probe(q, gold, args, pools)
         if router_ok:
             stats["router_ok"] += 1
             stats["per_source"][src]["router_ok"] += 1
             continue
 
-        t = run_agent(q, args.teacher_model, args.teacher_api_base, args.teacher_api_key,
-                      args.sub_model_api_base, args.sub_model_api_key, pools, temperature=0.3)
-        if not t["complete"] or not fuzzy_match(t["answer"], gold):
+        teacher_ok, teacher_result = stage2_teacher_run(q, gold, args, pools)
+        if not teacher_ok:
             rl_data.append({"question": q, "gold_answer": gold, "source": src, "domain": task["domain"]})
             stats["rl"] += 1
             stats["per_source"][src]["rl"] += 1
             continue
 
-        est_tokens = sum(len(str(m.get("content", ""))) for m in t["messages"]) // 3
-        if est_tokens > MAX_TRAINING_TOKENS:
+        keep_sft, packed_sample = stage3_filter_and_pack(task, teacher_result)
+        if not keep_sft:
             stats["overlong"] += 1
             continue
 
-        sft_data.append({
-            "conversations": to_sharegpt(t["messages"]),
-            "tools": tools_json,
-            "source": src, "domain": task["domain"], "gold_answer": gold,
-            "n_steps": t["n_steps"], "models_used": t["models_used"], "skills_used": t["skills_used"],
-        })
+        sft_data.append(packed_sample)
         stats["sft"] += 1
         stats["per_source"][src]["sft"] += 1
 
