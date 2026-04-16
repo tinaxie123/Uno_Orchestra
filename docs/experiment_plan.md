@@ -1,43 +1,28 @@
-### 🍬Data Source Pool Construction 
+### 🍬 Data Source Pool Construction
 
-**🍰 Data Source pool construction.** 
+**🍰 Task-structural selection.**
 
-A router must learn **when** and **how** to decompose a task. According to the capability taxonomy of general AI assistants (Mialon et al., 2024), we organize our data along four dimensions reflecting different decomposition patterns: 
+We select training sources solely by the **decomposition structure** they require — not by domain or target skill. The key insight is that a router's decision-making is determined by the structural pattern of a task (whether to decompose, how to chain steps, whether steps are independent or dependent), not by the surface domain. Skill assignments — which model to invoke, which capability to request — emerge entirely from training on structurally diverse tasks.
 
-🍓**reasoning**, where a problem must be broken into a chain of inferential or computational steps;  
+We apply two inclusion criteria to an initial candidate pool:
+(i) the task must exercise the router's decision-making, spanning both single-step tasks (where the router learns to dispatch directly) and multi-step tasks (where it must decompose into dependent sub-tasks);
+(ii) gold answers must be automatically verifiable to enable scalable filtering.
 
-🥭**knowledge retrieval**, where the router issues parallel or sequential queries to gather information from multiple sources; 
+Each source instantiates a distinct routing decision pattern that the router must learn:
 
-🍊**tool use**, where sub-tasks involve heterogeneous operations such as code execution or API calls;
-
-🍑**multi-step planning**, where intermediate results shape subsequent actions.   
-
-
-We select a minimal set of sources such that each of the four dimensions is covered by at least one dataset, and every source contributes a decomposition pattern not provided by the others. Starting from an initial pool of 8 widely-used datasets spanning 4 domains, we apply two inclusion criteria to ensure each source provides meaningful signal for router training:
-(i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model, and multi-step tasks where it must decompose the problem into dependent sub-tasks;
-(ii) gold answers must be automatically verifiable to enable scalable filtering;
-
-Sources:
-
-- GSM8K (Cobbe et al., 2021) — grade-school math, teaches the router when NOT to decompose
-- DAPO-Math-17k (Yu et al., 2025) and NuminaMath-CoT (Li et al., 2024) — competition-level mathematical reasoning
-- DROP, train split (Dua et al., 2019) — span extraction and arithmetic over paragraphs
-- HotpotQA (Yang et al., 2018), train split — 2-hop question answering
-- MuSiQue (Trivedi et al., 2022), train split — 3-4 hop question answering requiring deeper decomposition
-- TACO (Li et al., 2023) — competitive programming
-- ToolACE (Liu et al., 2024) — multi-step tool orchestration involving API chaining and sequential planning
-
-**🧁 Stratified coverage sampling.** We construct the training pool by drawing a fixed quota from each source so that four orthogonal capability axes are each exercised by at least two datasets and no single axis dominates the mixture:
-
-| Capability axis | What the router must learn | Datasets | Quota |
+| Decomposition structure | Routing decision | Sources | Quota |
 |---|---|---|---|
-| **Atomic reasoning** |  forward the task to a single model | GSM8K | 500 |
-| **Compositional reasoning** | Multi-step symbolic manipulation requiring chain-of-thought delegation | NuminaMath-CoT | 1,500 |
-| **Knowledge retrieval**  | Decompose into independent evidence-gathering subtasks | DROP, HotpotQA | 1,500 each |
-| **Knowledge composition** | Deep sequential decomposition with inter-subtask dependencies | MuSiQue | 1,500 |
-| **Tool orchestration** | Select correct tool–model pairs and chain API calls | TACO, ToolACE | 1,750 each |
+| **None** | Recognize atomic tasks and dispatch without decomposition | GSM8K (Cobbe et al., 2021) | 500 |
+| **Sequential** (1–2 steps) | Plan a short dependency chain and delegate step by step | NuminaMath-CoT (Li et al., 2024), HotpotQA (Yang et al., 2018) | 1.5k each |
+| **Deep sequential** (3+ steps) | Maintain a long dependency chain where intermediate results shape subsequent delegations | MuSiQue (Trivedi et al., 2022) | 1.5k |
+| **Parallel** | Decompose into independent sub-tasks and aggregate | DROP (Dua et al., 2019) | 1.5k |
+| **Heterogeneous pipeline** | Select different model–skill combinations at each step in a mixed-operation sequence | TACO (Li et al., 2023), ToolACE (Liu et al., 2024) | 1.75k each |
 
-This yields ~10k raw tasks. After bootstrapped curriculum filtering (see below), approximately 25–35% survive into the SFT set and 10–18% into the RL set, with the remainder discarded as already-solved by the current router. The quota is deliberately **balanced across capability axes rather than across datasets**: tool orchestration receives the largest share (35%) because routing decisions in this axis involve both model selection *and* skill selection, requiring more diverse demonstrations. Atomic reasoning receives the smallest share (5%) because it serves purely as a negative signal — teaching the router to recognize tasks that should *not* be decomposed.
+Total: ~10,000 raw tasks. Heterogeneous-pipeline sources receive the largest combined quota (35%) because the router must learn to jointly select over the model × skill product space, which demands more diverse demonstrations than single-skill delegation. "None" receives the smallest quota (5%) as it serves purely as a negative signal — teaching the router to recognize tasks that should *not* be decomposed.
+
+Crucially, no source is selected *for* a particular skill or domain. Because selection targets structural patterns rather than surface domains, the learned routing policy transfers to unseen domains at evaluation time (§5).
+
+After bootstrapped curriculum filtering (§ below), approximately 25–35% survive into the SFT set and 10–18% into the RL set, with the remainder discarded as already-solved by the current router.
 
 ### 🍭Data Selection Pipeline
 
