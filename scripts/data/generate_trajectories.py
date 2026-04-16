@@ -140,106 +140,7 @@ def run_agent(
     return {"messages": messages, "answer": answer, "complete": complete,
             "n_delegates": n_delegates, "models_used": models_used, "skills_used": skills_used}
 
-def _normalize_text(s: str) -> str:
-    s = s.lower().strip()
-    s = re.sub(r'\b(the|a|an)\b', '', s)
-    s = re.sub(r'[^\w\s]', '', s)
-    return re.sub(r'\s+', ' ', s).strip()
-
-
-def _numeric_close(a: str, b: str, tol: float = 1e-3) -> bool:
-    try:
-        return abs(float(a) - float(b)) < tol
-    except (ValueError, OverflowError):
-        return False
-
-
-def verify_math(pred: str, gold: str) -> bool:
-    """GSM8K / NuminaMath: numeric or symbolic exact match."""
-    if not pred or not gold:
-        return False
-    # Try numeric comparison first
-    pred_num = re.sub(r'[,$%]', '', pred.strip())
-    gold_num = re.sub(r'[,$%]', '', gold.strip())
-    if _numeric_close(pred_num, gold_num):
-        return True
-    # Fallback: normalized string match
-    return _normalize_text(pred) == _normalize_text(gold)
-
-
-def verify_qa(pred: str, gold: str) -> bool:
-    """HotpotQA / DROP / MuSiQue: EM + token-level F1 (threshold 0.6)."""
-    if not pred or not gold:
-        return False
-    p, g = _normalize_text(pred), _normalize_text(gold)
-    # Exact match
-    if p == g or g in p:
-        return True
-    # Token-level F1
-    p_tokens = set(p.split())
-    g_tokens = set(g.split())
-    if not p_tokens or not g_tokens:
-        return False
-    common = p_tokens & g_tokens
-    if not common:
-        return False
-    precision = len(common) / len(p_tokens)
-    recall = len(common) / len(g_tokens)
-    f1 = 2 * precision * recall / (precision + recall)
-    return f1 >= 0.6
-
-
-def verify_code(pred: str, gold: str, test_input: str = "", expected_output: str = "") -> bool:
-    """TACO: execute predicted code against test cases in sandbox.
-
-    If no test environment is available, falls back to structural similarity check.
-    Proper execution-based verification requires Docker (see scripts/sandbox/).
-    """
-    if not pred:
-        return False
-    # TODO: Docker-based execution when sandbox is available
-    #   return _run_in_sandbox(pred, test_input, expected_output)
-    # Fallback: check that prediction contains a function definition and is non-trivial
-    has_def = "def " in pred or "class " in pred
-    has_return = "return " in pred or "print(" in pred
-    return has_def and has_return and len(pred) >= 30
-
-
-def verify_toolace(pred: str, gold: str) -> bool:
-    """ToolACE: check that predicted tool calls match gold sequence structurally."""
-    if not pred or not gold:
-        return False
-    p, g = _normalize_text(pred), _normalize_text(gold)
-    if p == g or g in p:
-        return True
-    # Check for function/API call name overlap
-    pred_funcs = set(re.findall(r'\b\w+(?:\.\w+)*\(', pred))
-    gold_funcs = set(re.findall(r'\b\w+(?:\.\w+)*\(', gold))
-    if gold_funcs and pred_funcs:
-        overlap = len(pred_funcs & gold_funcs) / len(gold_funcs)
-        return overlap >= 0.5
-    return False
-
-
-# Dispatch table: source name → verifier
-VERIFIERS: dict[str, callable] = {
-    "gsm8k": verify_math,
-    "numinamath": verify_math,
-    "hotpotqa": verify_qa,
-    "drop": verify_qa,
-    "musique": verify_qa,
-    "taco": verify_code,
-    "toolace": verify_toolace,
-}
-
-
-def verify(pred: str, gold: str, source: str) -> bool:
-    """Route to the appropriate verifier based on source dataset."""
-    for key, fn in VERIFIERS.items():
-        if key in source:
-            return fn(pred, gold)
-    # Unknown source: fallback to basic match
-    return _normalize_text(pred) == _normalize_text(gold) if pred and gold else False
+from scripts.data.verifiers import verify
 
 def to_sharegpt(messages: list[dict]) -> list[dict]:
     conversations = []
@@ -364,7 +265,8 @@ def _extract_qa(name: str, row: dict) -> tuple[str, str]:
         return row.get("question", ""), m.group(1).strip() if m else ""
     if "numinamath" in name:
         sol = row.get("solution", "")
-        m = re.findall(r'\\boxed\{([^}]+)\}', sol)
+        # Support nested braces: \boxed{\frac{13}{3}}
+        m = re.findall(r'\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}', sol)
         return row.get("problem", ""), m[-1] if m else ""
     if "dapo" in name:
         prompt = row.get("prompt", [])
