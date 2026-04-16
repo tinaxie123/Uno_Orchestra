@@ -1,28 +1,24 @@
 ### 🍬 Data Source Pool Construction
 
-**🍰 Task-structural selection.**
+**🍰 Source selection.**
 
-We select training sources solely by the **decomposition structure** they require — not by domain or target skill. The key insight is that a router's decision-making is determined by the structural pattern of a task (whether to decompose, how to chain steps, whether steps are independent or dependent), not by the surface domain. Skill assignments — which model to invoke, which capability to request — emerge entirely from training on structurally diverse tasks.
+We select 7 sources from widely-used benchmarks based on two criteria: (i) the task must exercise the router's decision-making capability, spanning both single-step tasks (where the router learns to dispatch directly) and multi-step tasks (where it must decompose into dependent sub-tasks); (ii) gold answers must be automatically verifiable to enable scalable filtering. We deliberately draw from diverse domains (math, QA, code, tool-use) to prevent the router from overfitting to surface features of any single domain.
 
-We apply two inclusion criteria to an initial candidate pool:
-(i) the task must exercise the router's decision-making, spanning both single-step tasks (where the router learns to dispatch directly) and multi-step tasks (where it must decompose into dependent sub-tasks);
-(ii) gold answers must be automatically verifiable to enable scalable filtering.
+| Source | Domain | Quota |
+|---|---|---|
+| GSM8K (Cobbe et al., 2021) | Math | 500 |
+| NuminaMath-CoT (Li et al., 2024) | Math | 1.5k |
+| HotpotQA (Yang et al., 2018) | QA | 1.5k |
+| DROP (Dua et al., 2019) | QA | 1.5k |
+| MuSiQue (Trivedi et al., 2022) | QA | 1.5k |
+| TACO (Li et al., 2023) | Code | 1.75k |
+| ToolACE (Liu et al., 2024) | Tool-use | 1.75k |
 
-Each source instantiates a distinct routing decision pattern that the router must learn:
+Total: ~10,000 raw tasks. GSM8K receives a smaller quota (500) because it is the only single-domain source whose tasks are predominantly solvable without decomposition; including more would dilute the proportion of decomposition-requiring tasks in the training pool. Tool-use sources (TACO, ToolACE) receive a larger quota (1.75k each) because they exhibit the highest variance in routing patterns, requiring more samples for adequate coverage.
 
-| Decomposition structure | Routing decision | Sources | Quota |
-|---|---|---|---|
-| **None** | Recognize atomic tasks and dispatch without decomposition | GSM8K (Cobbe et al., 2021) | 500 |
-| **Sequential** (1–2 steps) | Plan a short dependency chain and delegate step by step | NuminaMath-CoT (Li et al., 2024), HotpotQA (Yang et al., 2018) | 1.5k each |
-| **Deep sequential** (3+ steps) | Maintain a long dependency chain where intermediate results shape subsequent delegations | MuSiQue (Trivedi et al., 2022) | 1.5k |
-| **Parallel** | Decompose into independent sub-tasks and aggregate | DROP (Dua et al., 2019) | 1.5k |
-| **Heterogeneous pipeline** | Select different model–skill combinations at each step in a mixed-operation sequence | TACO (Li et al., 2023), ToolACE (Liu et al., 2024) | 1.75k each |
+Crucially, no source is selected *for* a particular decomposition structure or skill. The router's skill assignments — which model to invoke, which capability to request — emerge entirely from training on domain-diverse tasks. After running the bootstrapped curriculum filtering pipeline (§ below), we measure the decomposition depth (`n_delegates`) of each surviving teacher trajectory. The resulting distribution covers depths 0 through 5+, confirming that the source mixture naturally spans the full range of routing complexity without requiring explicit depth-based stratification (see §5, Figure X).
 
-Total: ~10,000 raw tasks. Heterogeneous-pipeline sources receive the largest combined quota (35%) because the router must learn to jointly select over the model × skill product space, which demands more diverse demonstrations than single-skill delegation. "None" receives the smallest quota (5%) as it serves purely as a negative signal — teaching the router to recognize tasks that should *not* be decomposed.
-
-Crucially, no source is selected *for* a particular skill or domain. Because selection targets structural patterns rather than surface domains, the learned routing policy transfers to unseen domains at evaluation time (§5).
-
-After bootstrapped curriculum filtering (§ below), approximately 25–35% survive into the SFT set and 10–18% into the RL set, with the remainder discarded as already-solved by the current router.
+After curriculum filtering, approximately 25–35% of raw tasks survive into the SFT set and 10–18% into the RL set, with the remainder discarded as already-solved by the current router.
 
 ### 🍭Data Selection Pipeline
 
