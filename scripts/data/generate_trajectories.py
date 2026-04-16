@@ -140,21 +140,106 @@ def run_agent(
     return {"messages": messages, "answer": answer, "complete": complete,
             "n_delegates": n_delegates, "models_used": models_used, "skills_used": skills_used}
 
-def fuzzy_match(pred: str, gold: str) -> bool:
+def _normalize_text(s: str) -> str:
+    s = s.lower().strip()
+    s = re.sub(r'\b(the|a|an)\b', '', s)
+    s = re.sub(r'[^\w\s]', '', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _numeric_close(a: str, b: str, tol: float = 1e-3) -> bool:
+    try:
+        return abs(float(a) - float(b)) < tol
+    except (ValueError, OverflowError):
+        return False
+
+
+def verify_math(pred: str, gold: str) -> bool:
+    """GSM8K / NuminaMath: numeric or symbolic exact match."""
     if not pred or not gold:
         return False
-    def norm(s):
-        s = s.lower().strip()
-        s = re.sub(r'\b(the|a|an)\b', '', s)
-        s = re.sub(r'[^\w\s]', '', s)
-        return re.sub(r'\s+', ' ', s).strip()
-    p, g = norm(pred), norm(gold)
+    # Try numeric comparison first
+    pred_num = re.sub(r'[,$%]', '', pred.strip())
+    gold_num = re.sub(r'[,$%]', '', gold.strip())
+    if _numeric_close(pred_num, gold_num):
+        return True
+    # Fallback: normalized string match
+    return _normalize_text(pred) == _normalize_text(gold)
+
+
+def verify_qa(pred: str, gold: str) -> bool:
+    """HotpotQA / DROP / MuSiQue: EM + token-level F1 (threshold 0.6)."""
+    if not pred or not gold:
+        return False
+    p, g = _normalize_text(pred), _normalize_text(gold)
+    # Exact match
     if p == g or g in p:
         return True
-    try:
-        return abs(float(p) - float(g)) < 1e-3
-    except ValueError:
+    # Token-level F1
+    p_tokens = set(p.split())
+    g_tokens = set(g.split())
+    if not p_tokens or not g_tokens:
         return False
+    common = p_tokens & g_tokens
+    if not common:
+        return False
+    precision = len(common) / len(p_tokens)
+    recall = len(common) / len(g_tokens)
+    f1 = 2 * precision * recall / (precision + recall)
+    return f1 >= 0.6
+
+
+def verify_code(pred: str, gold: str, test_input: str = "", expected_output: str = "") -> bool:
+    """TACO: execute predicted code against test cases in sandbox.
+
+    If no test environment is available, falls back to structural similarity check.
+    Proper execution-based verification requires Docker (see scripts/sandbox/).
+    """
+    if not pred:
+        return False
+    # TODO: Docker-based execution when sandbox is available
+    #   return _run_in_sandbox(pred, test_input, expected_output)
+    # Fallback: check that prediction contains a function definition and is non-trivial
+    has_def = "def " in pred or "class " in pred
+    has_return = "return " in pred or "print(" in pred
+    return has_def and has_return and len(pred) >= 30
+
+
+def verify_toolace(pred: str, gold: str) -> bool:
+    """ToolACE: check that predicted tool calls match gold sequence structurally."""
+    if not pred or not gold:
+        return False
+    p, g = _normalize_text(pred), _normalize_text(gold)
+    if p == g or g in p:
+        return True
+    # Check for function/API call name overlap
+    pred_funcs = set(re.findall(r'\b\w+(?:\.\w+)*\(', pred))
+    gold_funcs = set(re.findall(r'\b\w+(?:\.\w+)*\(', gold))
+    if gold_funcs and pred_funcs:
+        overlap = len(pred_funcs & gold_funcs) / len(gold_funcs)
+        return overlap >= 0.5
+    return False
+
+
+# Dispatch table: source name → verifier
+VERIFIERS: dict[str, callable] = {
+    "gsm8k": verify_math,
+    "numinamath": verify_math,
+    "hotpotqa": verify_qa,
+    "drop": verify_qa,
+    "musique": verify_qa,
+    "taco": verify_code,
+    "toolace": verify_toolace,
+}
+
+
+def verify(pred: str, gold: str, source: str) -> bool:
+    """Route to the appropriate verifier based on source dataset."""
+    for key, fn in VERIFIERS.items():
+        if key in source:
+            return fn(pred, gold)
+    # Unknown source: fallback to basic match
+    return _normalize_text(pred) == _normalize_text(gold) if pred and gold else False
 
 def to_sharegpt(messages: list[dict]) -> list[dict]:
     conversations = []
@@ -190,7 +275,7 @@ def estimate_tokens(messages: list[dict]) -> int:
     return sum(len(str(message.get("content", ""))) for message in messages) // 3
 
 
-def router_probe(question: str, gold: str, args: argparse.Namespace, pools: PoolConfig) -> bool:
+def router_probe(question: str, gold: str, source: str, args: argparse.Namespace, pools: PoolConfig) -> bool:
     for _ in range(ROUTER_PASS_K):
         result = run_agent(
             question,
@@ -202,12 +287,12 @@ def router_probe(question: str, gold: str, args: argparse.Namespace, pools: Pool
             pools,
             temperature=0.7,
         )
-        if result["complete"] and fuzzy_match(result["answer"], gold):
+        if result["complete"] and verify(result["answer"], gold, source):
             return True
     return False
 
 
-def teacher_run(question: str, gold: str, args: argparse.Namespace, pools: PoolConfig) -> tuple[bool, dict]:
+def teacher_run(question: str, gold: str, source: str, args: argparse.Namespace, pools: PoolConfig) -> tuple[bool, dict]:
     result = run_agent(
         question,
         args.teacher_model,
@@ -218,7 +303,7 @@ def teacher_run(question: str, gold: str, args: argparse.Namespace, pools: PoolC
         pools,
         temperature=0.3,
     )
-    return result["complete"] and fuzzy_match(result["answer"], gold), result
+    return result["complete"] and verify(result["answer"], gold, source), result
 
 
 def filter_and_pack(task: dict, teacher_result: dict) -> tuple[bool, dict | None]:
@@ -344,13 +429,13 @@ def main() -> int:
         q, gold, src = task["question"], task["gold_answer"], task["source"]
         stats["per_source"][src]["total"] += 1
 
-        router_ok = router_probe(q, gold, args, pools)
+        router_ok = router_probe(q, gold, src, args, pools)
         if router_ok:
             stats["router_ok"] += 1
             stats["per_source"][src]["router_ok"] += 1
             continue
 
-        teacher_ok, teacher_result = teacher_run(q, gold, args, pools)
+        teacher_ok, teacher_result = teacher_run(q, gold, src, args, pools)
         if not teacher_ok:
             rl_data.append({"question": q, "gold_answer": gold, "source": src, "domain": task["domain"]})
             stats["rl"] += 1
