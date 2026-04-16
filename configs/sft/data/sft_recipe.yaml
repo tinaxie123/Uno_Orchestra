@@ -1,38 +1,51 @@
 
 datasets:
 
+  # --- Atomic reasoning: teaches router when NOT to decompose ---
+  - name: gsm8k
+    hf_path: openai/gsm8k
+    hf_subset: main
+    split: train
+    domain: atomic_reasoning
+    n_samples: 500
+
+  # --- Compositional reasoning: competition-level math ---
   - name: numinamath
     hf_path: AI-MO/NuminaMath-CoT
     split: train
-    domain: reasoning
+    domain: compositional_reasoning
+    n_samples: 1500
 
-  - name: dapo
-    hf_path: BytedTsinghua-SIA/DAPO-Math-17k
-    split: train
-    domain: reasoning
-
+  # --- Knowledge retrieval: 1-2 hop ---
   - name: drop
     hf_path: ucinlp/drop
     split: train
     domain: knowledge_retrieval
+    n_samples: 1500
 
   - name: hotpotqa
     hf_path: hotpot_qa
     hf_subset: fullwiki
     split: train
     domain: knowledge_retrieval
+    n_samples: 1500
 
+  # --- Knowledge composition: 3-4 hop ---
+  - name: musique
+    hf_path: dingkang/musique
+    split: train
+    domain: knowledge_composition
+    n_samples: 1500
+
+  # --- Tool orchestration: code + API chaining ---
   - name: taco
     hf_path: BAAI/TACO
     split: train
-    domain: tool_use
-
-  - name: leetcode
-    hf_path: greengerong/leetcode
-    split: train
-    domain: tool_use
+    domain: tool_orchestration
+    n_samples: 1750
 
   - name: toolace
     hf_path: Team-ACE/ToolACE
     split: train
-    domain: tool_use_planning
+    domain: tool_orchestration
+    n_samples: 1750

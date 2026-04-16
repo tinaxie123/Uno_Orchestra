@@ -27,6 +27,18 @@ Sources:
 - TACO (Li et al., 2023) — competitive programming
 - ToolACE (Liu et al., 2024) — multi-step tool orchestration involving API chaining and sequential planning
 
+**🧁 Stratified coverage sampling.** We construct the training pool by drawing a fixed quota from each source so that four orthogonal capability axes are each exercised by at least two datasets and no single axis dominates the mixture:
+
+| Capability axis | What the router must learn | Datasets | Quota |
+|---|---|---|---|
+| **Atomic reasoning** | When *not* to decompose — forward the task to a single model | GSM8K | 500 |
+| **Compositional reasoning** | Multi-step symbolic manipulation requiring chain-of-thought delegation | NuminaMath-CoT | 1,500 |
+| **Knowledge retrieval** (1–2 hop) | Decompose into independent evidence-gathering subtasks | DROP, HotpotQA | 1,500 each |
+| **Knowledge composition** (3–4 hop) | Deep sequential decomposition with inter-subtask dependencies | MuSiQue | 1,500 |
+| **Tool orchestration** | Select correct tool–model pairs and chain API calls | TACO, ToolACE | 1,750 each |
+
+This yields ~10k raw tasks. After bootstrapped curriculum filtering (see below), approximately 25–35% survive into the SFT set and 10–18% into the RL set, with the remainder discarded as already-solved by the current router. The quota is deliberately **balanced across capability axes rather than across datasets**: tool orchestration receives the largest share (35%) because routing decisions in this axis involve both model selection *and* skill selection, requiring more diverse demonstrations. Atomic reasoning receives the smallest share (5%) because it serves purely as a negative signal — teaching the router to recognize tasks that should *not* be decomposed.
+
 ### 🍭Data Selection Pipeline
 
 We emply **bootstrapped curriculum filtering** on raw question sets from training data pools for supervised fine-tuning and reinforcement learning to ensure the training set consists entirely of router's capability gaps. 

@@ -272,6 +272,11 @@ def load_question_pool(recipe: list[dict]) -> list[dict]:
 
 
 def _extract_qa(name: str, row: dict) -> tuple[str, str]:
+    if "gsm8k" in name:
+        answer = row.get("answer", "")
+        # GSM8K format: "reasoning text\n#### 42"
+        m = re.search(r'####\s*(.+)', answer)
+        return row.get("question", ""), m.group(1).strip() if m else ""
     if "numinamath" in name:
         sol = row.get("solution", "")
         m = re.findall(r'\\boxed\{([^}]+)\}', sol)
@@ -284,11 +289,11 @@ def _extract_qa(name: str, row: dict) -> tuple[str, str]:
         return f"Passage: {row.get('passage','')}\n\nQuestion: {row.get('question','')}", spans[0] if spans else ""
     if "hotpotqa" in name:
         return row.get("question", ""), row.get("answer", "")
+    if "musique" in name:
+        return row.get("question", ""), row.get("answer", "")
     if "taco" in name:
         sols = row.get("solutions", "")
         return row.get("question", ""), (sols[0] if isinstance(sols, list) and sols else str(sols))
-    if "leetcode" in name:
-        return row.get("content", row.get("question", "")), ""
     if "toolace" in name:
         convs = row.get("conversations", [])
         q = next((c.get("value", "") for c in convs if c.get("from") == "user"), "")
