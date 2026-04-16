@@ -190,7 +190,7 @@ def estimate_tokens(messages: list[dict]) -> int:
     return sum(len(str(message.get("content", ""))) for message in messages) // 3
 
 
-def stage1_router_probe(question: str, gold: str, args: argparse.Namespace, pools: PoolConfig) -> bool:
+def router_probe(question: str, gold: str, args: argparse.Namespace, pools: PoolConfig) -> bool:
     for _ in range(ROUTER_PASS_K):
         result = run_agent(
             question,
@@ -207,7 +207,7 @@ def stage1_router_probe(question: str, gold: str, args: argparse.Namespace, pool
     return False
 
 
-def stage2_teacher_run(question: str, gold: str, args: argparse.Namespace, pools: PoolConfig) -> tuple[bool, dict]:
+def teacher_run(question: str, gold: str, args: argparse.Namespace, pools: PoolConfig) -> tuple[bool, dict]:
     result = run_agent(
         question,
         args.teacher_model,
@@ -221,7 +221,7 @@ def stage2_teacher_run(question: str, gold: str, args: argparse.Namespace, pools
     return result["complete"] and fuzzy_match(result["answer"], gold), result
 
 
-def stage3_filter_and_pack(task: dict, teacher_result: dict) -> tuple[bool, dict | None]:
+def filter_and_pack(task: dict, teacher_result: dict) -> tuple[bool, dict | None]:
     est_tokens = estimate_tokens(teacher_result["messages"])
     if est_tokens > MAX_TRAINING_TOKENS:
         return False, None
@@ -339,20 +339,20 @@ def main() -> int:
         q, gold, src = task["question"], task["gold_answer"], task["source"]
         stats["per_source"][src]["total"] += 1
 
-        router_ok = stage1_router_probe(q, gold, args, pools)
+        router_ok = router_probe(q, gold, args, pools)
         if router_ok:
             stats["router_ok"] += 1
             stats["per_source"][src]["router_ok"] += 1
             continue
 
-        teacher_ok, teacher_result = stage2_teacher_run(q, gold, args, pools)
+        teacher_ok, teacher_result = teacher_run(q, gold, args, pools)
         if not teacher_ok:
             rl_data.append({"question": q, "gold_answer": gold, "source": src, "domain": task["domain"]})
             stats["rl"] += 1
             stats["per_source"][src]["rl"] += 1
             continue
 
-        keep_sft, packed_sample = stage3_filter_and_pack(task, teacher_result)
+        keep_sft, packed_sample = filter_and_pack(task, teacher_result)
         if not keep_sft:
             stats["overlong"] += 1
             continue
