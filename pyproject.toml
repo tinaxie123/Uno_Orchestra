@@ -1,0 +1,47 @@
+[project]
+name = "multiagentrl"
+version = "0.1.0"
+description = "Multi-agent routing with SFT and RL"
+requires-python = ">=3.10"
+
+dependencies = [
+    # Core
+    "pyyaml>=6.0",
+    "tqdm>=4.60",
+    "openai>=1.0",
+    "datasets>=2.14",
+
+    # SFT data pipeline
+    "pandas>=2.0",
+    "pyarrow>=12.0",
+
+    # Eval
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+serve = [
+    "vllm>=0.6",
+    "pyairports",
+]
+train = [
+    "torch>=2.1",
+    "transformers>=4.40",
+    "deepspeed>=0.14",
+]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools.packages.find]
+include = ["configs*", "scripts*", "eval_pipeline*", "agent_system*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
