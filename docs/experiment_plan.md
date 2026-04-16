@@ -13,16 +13,18 @@ A router must learn **when** and **how** to decompose a task. According to the c
 🍑**multi-step planning**, where intermediate results shape subsequent actions.   
 
 
-We select a minimal set of sources such that each of the four dimensions is covered by at least one dataset, and every source contributes a decomposition pattern not provided by the others. Starting from an initial pool of 7 widely-used datasets spanning 5 domains, we apply two inclusion criteria to ensure each source provides meaningful signal for router training: 
+We select a minimal set of sources such that each of the four dimensions is covered by at least one dataset, and every source contributes a decomposition pattern not provided by the others. Starting from an initial pool of 8 widely-used datasets spanning 4 domains, we apply two inclusion criteria to ensure each source provides meaningful signal for router training:
 (i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model, and multi-step tasks where it must decompose the problem into dependent sub-tasks;
-(ii) gold answers must be automatically verifiable to enable scalable filtering; 
+(ii) gold answers must be automatically verifiable to enable scalable filtering;
 
-This yields approximately 12K tasks from the following sources:
+Sources:
 
-- DAPO-Math-17k (Yu et al., 2025) and NuminaMath-CoT (Li et al., 2024) mathematical reasoning from K-12 through olympiad
-- DROP, train spilt(Dua et al., 2019)  span extraction and arithmetic over paragraphs
-- HotpotQA (Yang et al., 2018), train split — multi-hop question answering
-- TACO (Li et al., 2023) LeetCode— code generation
+- GSM8K (Cobbe et al., 2021) — grade-school math, teaches the router when NOT to decompose
+- DAPO-Math-17k (Yu et al., 2025) and NuminaMath-CoT (Li et al., 2024) — competition-level mathematical reasoning
+- DROP, train split (Dua et al., 2019) — span extraction and arithmetic over paragraphs
+- HotpotQA (Yang et al., 2018), train split — 2-hop question answering
+- MuSiQue (Trivedi et al., 2022), train split — 3-4 hop question answering requiring deeper decomposition
+- TACO (Li et al., 2023) — competitive programming
 - ToolACE (Liu et al., 2024) — multi-step tool orchestration involving API chaining and sequential planning
 
 ### 🍭Data Selection Pipeline
@@ -85,21 +87,21 @@ Train/val source overlap: **0**.
 
 ## 2. Model & Pools
 
-**Policy model**: Qwen2.5-7B-Instruct (SFT warm-start -> RL fine-tune)
+**Policy model (compared)**: Qwen3-4B, Qwen2.5-7B-Instruct
 
-**Worker pool**: 9 executor models across 5 families (`configs/pools.yaml`)
+**Worker pool**: 9 models across 5 providers (`configs/pools.yaml`)
 
-| Tier | Model | USD/1M output tokens |
-|------|-------|---------------------|
-| nano | claude-haiku-4-5-20251001 | $1.25 |
-| nano | gemini-2.5-flash | $1.50 |
-| mid | kimi-k2.5 | $2.00 |
-| mid | claude-sonnet-4-6 | $15.00 |
-| mid | gemini-3.1-pro-preview | $10.00 |
-| code | gpt-5.3-codex | $20.00 |
-| large | qwen3.6-plus | $8.00 |
-| large | claude-opus-4-6 | $75.00 |
-| large | gpt-5.4 | $60.00 |
+| Model | USD/1M output tokens |
+|-------|---------------------|
+| gemini-2.5-flash | $0.60 |
+| kimi-k2.5 | $2.50 |
+| qwen3.6-plus | $3.00 |
+| claude-haiku-4-5-20251001 | $4.00 |
+| gemini-3.1-pro-preview | $12.00 |
+| gpt-5.3-codex | $14.00 |
+| gpt-5.4 | $15.00 |
+| claude-sonnet-4-6 | $15.00 |
+| claude-opus-4-6 | $75.00 |
 
 **Skill pool**: 13 skills: direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, parse_structured, symbolic_math, execute_python, execute_shell, fact_check, call_api.
 
@@ -107,33 +109,18 @@ Train/val source overlap: **0**.
 
 ## 3. SFT Training
 
-**Config**: `configs/sft/router_sft_qwen25_7b.yaml`
+**Configs**: `configs/sft/sft_qwen3_4b.yaml`, `configs/sft/sft_qwen3_8b.yaml`
 
-| Parameter | Value |
-|-----------|-------|
-| Base model | Qwen2.5-7B-Instruct |
-| Framework | LlamaFactory |
-| GPUs | 4x H100 80GB |
-| Epochs | 3 |
-| Effective batch | 128 (1 x 32 x 4) |
-| cutoff_len | 8192 (zero truncation) |
-| packing | true |
-| Learning rate | 2e-5, cosine, warmup 67 steps |
-| DeepSpeed | ZeRO-2 |
-| Duration | 6h 51m |
-
-**Results**:
-
-| Metric | Value |
-|--------|-------|
-| train_loss | 0.2506 |
-| eval_loss | 0.2976 |
-| Format correctness | 100% (all 5 test queries produce valid schema v1.1) |
-| Skill routing | Correct (math->symbolic_math, factual->web_search, code->execute_python) |
-| Model selection | Correct (easy->haiku, hard->opus, code->codex) |
-| DAG construction | Correct (depends_on, parallel subtasks) |
-
-**Checkpoint**: `/home/xieht/data/sft/checkpoints/router_qwen25_7b_full_sft`
+| Parameter | Qwen3-4B | Qwen2.5-7B-Instruct |
+|-----------|----------|---------------------|
+| Framework | LlamaFactory | LlamaFactory |
+| GPUs | 4x H100 80GB | 4x H100 80GB |
+| Epochs | 3 | 3 |
+| Effective batch | 128 (2 x 16 x 4) | 128 (1 x 32 x 4) |
+| cutoff_len | 8192 (zero truncation) | 8192 (zero truncation) |
+| packing | true | true |
+| Learning rate | 2e-5, cosine | 2e-5, cosine |
+| DeepSpeed | ZeRO-2 | ZeRO-2 |
 
 ---
 

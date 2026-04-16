@@ -1,0 +1,38 @@
+
+datasets:
+
+  - name: numinamath
+    hf_path: AI-MO/NuminaMath-CoT
+    split: train
+    domain: reasoning
+
+  - name: dapo
+    hf_path: BytedTsinghua-SIA/DAPO-Math-17k
+    split: train
+    domain: reasoning
+
+  - name: drop
+    hf_path: ucinlp/drop
+    split: train
+    domain: knowledge_retrieval
+
+  - name: hotpotqa
+    hf_path: hotpot_qa
+    hf_subset: fullwiki
+    split: train
+    domain: knowledge_retrieval
+
+  - name: taco
+    hf_path: BAAI/TACO
+    split: train
+    domain: tool_use
+
+  - name: leetcode
+    hf_path: greengerong/leetcode
+    split: train
+    domain: tool_use
+
+  - name: toolace
+    hf_path: Team-ACE/ToolACE
+    split: train
+    domain: tool_use_planning

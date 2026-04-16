@@ -19,6 +19,7 @@ import re
 import string
 import concurrent.futures
 import os
+import sys
 from typing import Any, Dict, List, Tuple
 
 import gym
@@ -30,6 +31,11 @@ try:
 except ImportError:
     openai = None
 
+# Load model pool from configs/pools.yaml (single source of truth)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "../../../../..")))
+from configs import load_pools as _load_pools
+
+_pools = _load_pools()
 
 # --- Schema v1.1 Parsers ---
 PLAN_RE = re.compile(r'<plan round="(\d+)">(.*?)</plan>', re.DOTALL)
@@ -40,33 +46,16 @@ ROUTE_RE = re.compile(
 )
 FINAL_RE = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
 
-# Valid pools
-VALID_MODELS = {
-    "claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6",
-    "gpt-5.4", "gpt-5.3-codex", "gemini-3.1-pro-preview", "gemini-2.5-flash",
-    "kimi-k2.5", "qwen3.6-plus",
-}
-VALID_SKILLS = {
-    "direct_answer", "reason", "web_search", "database_query", "read_document",
-    "read_code", "extract_field", "parse_structured", "symbolic_math",
-    "execute_python", "execute_shell", "fact_check", "call_api",
-}
+# Valid pools — from pools.yaml
+VALID_MODELS = set(_pools["models"])
+VALID_SKILLS = set(_pools["skills"])
 
-# Per-token cost (USD per 1M output tokens)
-MODEL_COST_PER_M_TOKENS = {
-    "claude-haiku-4-5-20251001": 1.25,
-    "gemini-2.5-flash": 1.50,
-    "kimi-k2.5": 2.00,
-    "claude-sonnet-4-6": 15.00,
-    "gemini-3.1-pro-preview": 10.00,
-    "gpt-5.3-codex": 20.00,
-    "qwen3.6-plus": 8.00,
-    "claude-opus-4-6": 75.00,
-    "gpt-5.4": 60.00,
-}
-MAX_COST_PER_ROUTE = MODEL_COST_PER_M_TOKENS["claude-opus-4-6"] * 500 / 1e6
-MAX_EPISODE_COST = MAX_COST_PER_ROUTE * 8
+# Per-token cost (USD per 1M output tokens) — from pools.yaml
+MODEL_COST_PER_M_TOKENS = _pools["cost_per_m"]
 DEFAULT_ALPHA = 0.1
+COST_WINDOW_SIZE = 1000  # rolling window for percentile normalization
+COST_PERCENTILE_LO = 5
+COST_PERCENTILE_HI = 95
 
 # Skill → system prompt for sub-agent
 SKILL_PROMPTS = {
@@ -282,6 +271,9 @@ class SkillRouterMultiProcessEnv(gym.Env):
         self.max_steps = env_config.max_steps if env_config else 3
         self.alpha = env_config.get("alpha", DEFAULT_ALPHA) if env_config else DEFAULT_ALPHA
 
+        # Rolling cost buffer for sqrt + percentile normalization (Router-R1 style)
+        self._cost_buffer: list[float] = []
+
         self.envs = [SingleSkillRouterEnv() for _ in range(self.batch_size)]
         # More workers for parallel API calls
         self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -337,8 +329,25 @@ class SkillRouterMultiProcessEnv(gym.Env):
                 rewards[i] = -1.0
             else:
                 # Format OK → compute outcome + cost
+                # Router-R1 style: sqrt + rolling percentile normalization
                 api_cost = self.envs[i].total_api_cost
-                r_cost = 1.0 - min(api_cost / MAX_EPISODE_COST, 1.0) if MAX_EPISODE_COST > 0 else 1.0
+                sqrt_cost = np.sqrt(api_cost) if api_cost > 0 else 0.0
+                self._cost_buffer.append(sqrt_cost)
+                if len(self._cost_buffer) > COST_WINDOW_SIZE:
+                    self._cost_buffer = self._cost_buffer[-COST_WINDOW_SIZE:]
+
+                if len(self._cost_buffer) >= 10:
+                    lo = np.percentile(self._cost_buffer, COST_PERCENTILE_LO)
+                    hi = np.percentile(self._cost_buffer, COST_PERCENTILE_HI)
+                    if hi > lo:
+                        norm_cost = np.clip((sqrt_cost - lo) / (hi - lo), 0.0, 1.0)
+                    else:
+                        norm_cost = 0.5
+                else:
+                    # Not enough data yet — use uniform prior
+                    norm_cost = 0.5
+
+                r_cost = 1.0 - norm_cost  # lower cost → higher reward
                 rewards[i] = (1 - self.alpha) * correctness + self.alpha * r_cost
 
             dones[i] = result["done"]

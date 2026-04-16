@@ -1,5 +1,5 @@
 ### model
-model_name_or_path: Qwen/Qwen2.5-7B-Instruct  # or local path
+model_name_or_path: Qwen/Qwen2.5-7B-Instruct
 trust_remote_code: true
 
 ### method

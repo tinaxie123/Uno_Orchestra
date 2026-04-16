@@ -1,66 +1,44 @@
-# Worker model pool + skill pool for the Router's closed-vocabulary action space.
-
-policy_model: Qwen/Qwen2.5-7B-Instruct
-default_model: claude-haiku-4-5-20251001
-enforcement: strict
-
-# 9 executor models across 5 families
+policy_models:
+  - Qwen/Qwen3-4B
+  - Qwen/Qwen2.5-7B-Instruct
 models:
-  - id: claude-haiku-4-5-20251001
-    family: anthropic
-    tier: nano
-    cost_rank: 1
-    allowed_skills: [direct_answer, web_search, read_document, extract_field, symbolic_math]
-
-  - id: claude-sonnet-4-6
-    family: anthropic
-    tier: mid
-    cost_rank: 3
-    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
-
-  - id: claude-opus-4-6
-    family: anthropic
-    tier: large
-    cost_rank: 5
-    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
-
-  - id: gpt-5.4
-    family: openai
-    tier: large
-    cost_rank: 5
-    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
-
-  - id: gpt-5.3-codex
-    family: openai
-    tier: code-specialist
-    cost_rank: 4
-    allowed_skills: [direct_answer, symbolic_math, execute_python, execute_shell, call_api, read_code, parse_structured]
-
-  - id: gemini-3.1-pro-preview
-    family: google
-    tier: large
-    cost_rank: 3
-    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
-
   - id: gemini-2.5-flash
-    family: google
-    tier: nano
-    cost_rank: 1
+    usd_per_1m_output: 0.60
     allowed_skills: [direct_answer, web_search, read_document, extract_field]
 
   - id: kimi-k2.5
-    family: moonshot
-    tier: large
-    cost_rank: 2
+    usd_per_1m_output: 2.50
     allowed_skills: [direct_answer, reason, web_search, read_document, extract_field, fact_check]
 
   - id: qwen3.6-plus
-    family: alibaba
-    tier: large
-    cost_rank: 4
+    usd_per_1m_output: 3.00
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
-# 13 skills
+  - id: claude-haiku-4-5-20251001
+    usd_per_1m_output: 4.00
+    allowed_skills: [direct_answer, web_search, read_document, extract_field, symbolic_math]
+
+  - id: gemini-3.1-pro-preview
+    usd_per_1m_output: 12.00
+    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
+
+  - id: gpt-5.3-codex
+    usd_per_1m_output: 14.00
+    allowed_skills: [direct_answer, symbolic_math, execute_python, execute_shell, call_api, read_code, parse_structured]
+
+  - id: gpt-5.4
+    usd_per_1m_output: 15.00
+    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
+
+  - id: claude-sonnet-4-6
+    usd_per_1m_output: 15.00
+    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
+
+ 
+  - id: claude-opus-4-6
+    usd_per_1m_output: 75.00
+    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
+
 skills:
   - id: direct_answer
   - id: reason
@@ -75,3 +53,11 @@ skills:
   - id: execute_shell
   - id: fact_check
   - id: call_api
+
+pool_ablations:
+  no_frontier:
+    exclude: [claude-opus-4-6, gpt-5.4, claude-sonnet-4-6]
+  minimal:
+    include: [gemini-2.5-flash, qwen3.6-plus, gpt-5.4]
+  mid_only:
+    include: [qwen3.6-plus, claude-haiku-4-5-20251001, gemini-3.1-pro-preview]
