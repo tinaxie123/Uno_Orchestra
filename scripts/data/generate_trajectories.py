@@ -13,6 +13,9 @@ import yaml
 from tqdm import tqdm
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+sys.path.insert(0, REPO_ROOT)
+from configs import load_pools  # single source of truth
+
 RECIPE_PATH = os.path.join(REPO_ROOT, "configs/sft/data/sft_recipe.yaml")
 POOLS_PATH = os.path.join(REPO_ROOT, "configs/pools.yaml")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "data/sft")
@@ -20,14 +23,6 @@ DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "data/sft")
 MAX_STEPS = 8
 MAX_TRAINING_TOKENS = 8192  # must match build_dataset.py MAX_TOKENS / SFT cutoff_len
 ROUTER_PASS_K = 3
-
-def load_pools(path: str) -> dict:
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
-    models = [m["id"] for m in cfg["models"]]
-    skills = [s["id"] for s in cfg.get("skills", [])]
-    model_skills = {m["id"]: m.get("allowed_skills", skills) for m in cfg["models"]}
-    return {"models": models, "skills": skills, "model_skills": model_skills}
 
 
 def load_recipe(path: str) -> list[dict]:
