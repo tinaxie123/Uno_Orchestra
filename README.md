@@ -1,15 +1,16 @@
-# SkillRouter: Learned Selective Delegation for Multi-Agent Systems
+# 
 
 ## Overview
 
-Large language models are increasingly deployed as agents that decompose complex tasks and delegate them to specialized workers. However, current multi-agent frameworks apply fixed decomposition strategies -- either always decompose (wasting compute on simple tasks) or never decompose (losing the benefit of specialization on hard tasks).
 
-We propose **SkillRouter**, a compact trainable router (7B) that learns **selective delegation** -- deciding per-query whether to solve directly or decompose into a DAG of subtasks, each routed to a specific (model, skill) pair from a heterogeneous worker pool. Training proceeds in two stages:
 
-1. **SFT warm-start** on 58K distilled multi-agent trajectories across 9 domains
-2. **GiGPO RL** with cost-aware reward: `R = (1-a) * correctness + a * cost_efficiency`
+✅**Failure-Taxonomy-Driven Prompt Patching**
+For each failed trajectory, we feed the full execution trace—including the Orchestrator's delegation decisions, sub-agent responses, and the final erroneous answer—into a strong analyst model (e.g., GPT-4), which diagnoses the root cause and assigns it to one of the following failure categories: (i) information loss which happens when the Orchestrator omits critical
+context when delegating subtasks; (ii) premature aggregation—intermediate results are returned without completing the final computation; (iii) format mismatch—the answer is semantically correct but does not conform to the expected output format; and (iv) delegation scope error—the task is under or over decomposed.  Once failures are categorized, we generate a minimal, targeted constraint for each high-frequency category and inject it into the Orchestrator's instruction. Crucially, these patches are not instance-specific fixes tied to particular failing examples; rather, they clarify the Orchestrator's general understanding of the task protocol—such as what constitutes a complete answer or what information must be preserved during delegation. The resulting constraints are task-agnostic and transfer to unseen problems, since they address systematic gaps in how the Orchestrator interprets its role rather than
+surface-level errors on individual inputs. 
 
-The router learns four behaviors: lazy (direct answer), one-shot decomposition, observation-driven continuation, and decomposition repair -- all within a single 7B model.
+
+📷This diagnostic-then-patch loop runs for 3 rounds. By the third round, the failure taxonomy reveals that all remaining errors stem from suboptimal routing decisions—such as dispatching a complex symbolic reasoning task to a lightweight model—rather than ambiguity in the Orchestrator's instructions. This indicates that prompt clarity has been saturated, and further gains   require improving the Router's model selection policy.
 
 ## Method
 
@@ -43,21 +44,11 @@ The router learns four behaviors: lazy (direct answer), one-shot decomposition, 
 
 ### Training Pipeline
 
-```
-HuggingFace datasets (31 sources, 9 domains)
-    |
-    v
-[Phase C] Teacher distillation --> 58,457 validated trajectories
-    |
-    v
-[Phase D] SFT warm-start (3 epochs, lr=2e-5, 4xH100) --> schema + routing learned
-    |
-    v
-[Phase E] GiGPO RL (100 steps, 7xH100) --> cost-aware delegation boundary optimized
-    |
-    v
-[Phase F] Evaluation (8 baselines x 17 benchmarks, official Docker verification)
-```
+
+
+### Parameters
+
+max token length 
 
 ## Evaluation
 
