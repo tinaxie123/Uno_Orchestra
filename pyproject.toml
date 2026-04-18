@@ -9,9 +9,11 @@ dependencies = [
     "pyyaml>=6.0",
     "tqdm>=4.60",
     "openai>=1.0",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
     "datasets>=2.14",
 
-    # SFT data pipeline
+    # Data pipeline
     "pandas>=2.0",
     "pyarrow>=12.0",
 
@@ -37,7 +39,7 @@ dev = [
 
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["configs*", "scripts*", "eval_pipeline*", "agent_system*"]

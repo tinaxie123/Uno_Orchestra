@@ -1,21 +1,13 @@
-"""
-Shared eval configuration — reads from configs/pools.yaml (single source of truth).
-"""
-
 import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from configs import load_pools
-
 _pools = load_pools()
-
 MODEL_POOL = _pools["models"]
 COST_PER_M = _pools["cost_per_m"]
 SKILLS = _pools["skills"]
 MODEL_FALLBACK = _pools["fallbacks"]
-
-# Eval defaults
 DEFAULT_API_BASE = "http://localhost:9000/v1"
 DEFAULT_LOCAL_BASE = "http://localhost:8000/v1"
 EVAL_MAX_TOKENS = 4096

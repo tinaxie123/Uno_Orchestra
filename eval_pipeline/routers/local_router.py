@@ -1,5 +1,7 @@
 """
-Router-R1 adapter: <think> → <search>Model:Query</search> → <information> → <answer>
+LocalRouter: local LLM selects which API model to call as sub-agent.
+
+Flow: <think> → <search>Model:Query</search> → <information> → <answer>
 """
 import re
 import openai
@@ -23,7 +25,7 @@ Question: {question}
 
 # Display name → API model ID
 _NAME_MAP = {
-    "claude-haiku-4.5": "gemini-2.5-flash",  # haiku channel down, fallback to same-tier nano model
+    "claude-haiku-4.5": "gemini-2.5-flash",
     "gemini-2.5-flash": "gemini-2.5-flash",
     "kimi-k2.5": "kimi-k2.5",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
@@ -58,21 +60,22 @@ def _resolve(raw: str) -> str:
     return DEFAULT_MODEL
 
 
-class RouterR1(BaseRouter):
-    """Router-R1 (Qwen2.5-3B-Instruct), pre-trained model-selection router."""
+class LocalRouter(BaseRouter):
+    """Local LLM as router: picks API model + forwards query as sub-agent call."""
 
     def __init__(self, local_base=DEFAULT_LOCAL_BASE, api_base=DEFAULT_API_BASE,
-                 api_key="EMPTY", model_name="Router-R1-Qwen2.5-3B-Instruct",
+                 api_key="EMPTY", model_name="Qwen/Qwen2.5-7B-Instruct",
                  max_turns=3, agent_prompt=""):
         self.local = openai.OpenAI(base_url=local_base, api_key="EMPTY")
         self.api = openai.OpenAI(base_url=api_base, api_key=api_key)
         self.model_name = model_name
         self.max_turns = max_turns
-        self.agent_prompt = agent_prompt  # benchmark-specific sub-agent prompt
+        self.agent_prompt = agent_prompt
+        self.system_prompt = ROUTER_PROMPT  # exposed for interactive mode
 
     @property
     def name(self):
-        return "Router-R1"
+        return f"LocalRouter({self.model_name.split('/')[-1]})"
 
     def route(self, question: str, context: dict = None) -> RouteResult:
         ctx = context or {}
@@ -105,7 +108,6 @@ class RouterR1(BaseRouter):
                     mid = _resolve(parts[0]) if len(parts) > 1 else DEFAULT_MODEL
                     query = parts[1].strip() if len(parts) > 1 else raw
 
-                    # Build sub-agent prompt
                     sub_prompt = self.agent_prompt.format(query=query, **ctx) if self.agent_prompt else query
                     try:
                         sr = self.api.chat.completions.create(

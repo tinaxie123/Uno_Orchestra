@@ -1,18 +1,3 @@
-"""
-Unified eval pipeline for all router models on all benchmarks.
-Supports pipelined mode: generate + Docker verify concurrently.
-
-Usage:
-    # Router-R1 on Terminal-Bench (pipelined: generate + verify concurrently)
-    python -m eval_pipeline.run --router router-r1 --bench terminalbench --api_key KEY
-
-    # Router-R1 on SWE-bench
-    python -m eval_pipeline.run --router router-r1 --bench swebench --api_key KEY
-
-    # Baselines
-    python -m eval_pipeline.run --router oracle-strongest --bench swebench --api_key KEY
-    python -m eval_pipeline.run --router random --bench terminalbench --api_key KEY
-"""
 import json
 import queue
 import argparse
@@ -23,14 +8,9 @@ from tqdm import tqdm
 
 from .config import DEFAULT_API_BASE, DEFAULT_LOCAL_BASE
 from .routers import ROUTER_REGISTRY, BaseRouter
-from .routers.router_r1 import RouterR1
+from .routers.local_router import LocalRouter
 from .routers.direct import DirectRouter
-from .benchmarks import BENCH_REGISTRY, BaseBenchmark, Task
-
-# ═══════════════════════════════════════════════════════════════════════
-# Sub-agent prompts per benchmark
-# ═══════════════════════════════════════════════════════════════════════
-
+from .benchmarks import BENCH_REGISTRY, BaseBenchmark
 AGENT_PROMPTS = {
     "swebench": (
         "You are a software engineering expert.\n"
@@ -47,28 +27,32 @@ AGENT_PROMPTS = {
 }
 
 
+def _get_agent_prompt(bench_name: str) -> str:
+    return AGENT_PROMPTS.get(bench_name, "")
+
+
 def build_router(name: str, args) -> BaseRouter:
     kw = dict(api_base=args.api_base, api_key=args.api_key)
-    if name == "router-r1":
-        return RouterR1(local_base=args.local_base,
-                        agent_prompt=AGENT_PROMPTS.get(args.bench, ""), **kw)
-    elif name == "skillrouter-sft":
-        from .routers.skillrouter_sft import SkillRouterSFT
-        return SkillRouterSFT(local_base=args.local_base,
-                              model_name=args.local_model or "SkillRouter-SFT", **kw)
-    elif name == "direct":
-        # If local_model specified, use local vLLM; else use API
+    if name == "local":
+        return LocalRouter(
+            local_base=args.local_base,
+            model_name=args.local_model or "Qwen/Qwen2.5-7B-Instruct",
+            agent_prompt=_get_agent_prompt(args.bench),
+            **kw,
+        )
+    if name == "direct":
         if args.local_model:
-            return DirectRouter(model_id=args.local_model,
-                                api_base=args.local_base, api_key="EMPTY")
+            return DirectRouter(
+                model_id=args.local_model,
+                api_base=args.local_base,
+                api_key="EMPTY",
+            )
         return DirectRouter(model_id=args.direct_model or "gpt-5.4", **kw)
-    elif name.startswith("oracle-"):
+    if name.startswith("oracle-"):
         return ROUTER_REGISTRY[name](**kw)
-    elif name == "random":
+    if name == "random":
         return ROUTER_REGISTRY["random"](**kw)
-    else:
-        raise ValueError(f"Unknown router: {name}")
-
+    raise ValueError(f"Unknown router: {name}")
 
 def build_bench(name: str, args) -> BaseBenchmark:
     if name == "swebench":
@@ -79,9 +63,6 @@ def build_bench(name: str, args) -> BaseBenchmark:
         raise ValueError(f"Unknown benchmark: {name}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Pipelined execution: generate + verify concurrently
-# ═══════════════════════════════════════════════════════════════════════
 
 def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
     out = Path(args.output_dir)
@@ -97,8 +78,6 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
 
     # Load tasks
     tasks = bench.load(args.max_tasks)
-    task_map = {t.task_id: t for t in tasks}
-
     # Resume cached predictions
     predictions = {}
     if pred_file.exists():
@@ -121,18 +100,17 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
     need_gen = [t for t in tasks if t.task_id not in predictions]
     need_verify = [t for t in tasks if t.task_id not in verification]
 
-    # Check if router supports interactive mode (has local LLM + schema)
+    # Interactive mode: router ↔ Docker multi-turn (for both SWE-bench and Terminal-Bench)
     is_interactive = (hasattr(router, 'local') and hasattr(router, 'model_name')
-                      and bench.name == "Terminal-Bench-2.0"
+                      and hasattr(bench, 'interactive_verify')
                       and args.interactive)
 
     if is_interactive:
-        # Interactive mode: router ↔ Docker multi-turn loop
         _run_interactive(router, bench, tasks, need_verify,
                          predictions, verification, pred_file, verify_file,
                          logs_dir, args)
-    elif bench.name == "SWE-bench_Verified":
-        # SWE-bench: generate all → batch harness verification (official method)
+    elif bench.name == "SWE-bench_Verified" and not args.interactive:
+        # SWE-bench one-shot fallback (no env feedback, weak baseline)
         _run_sequential(router, bench, tasks, need_gen, need_verify,
                         predictions, verification, pred_file, verify_file,
                         logs_dir, args)
@@ -349,28 +327,22 @@ def _gen_one(router, bench, task):
         "cost": res.total_cost, "tokens": res.total_tokens,
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════
-
 def main():
-    parser = argparse.ArgumentParser(description="Unified router evaluation pipeline")
+    parser = argparse.ArgumentParser(description="Eval pipeline: router → sub-agent → benchmark")
     parser.add_argument("--router", required=True, choices=list(ROUTER_REGISTRY))
     parser.add_argument("--bench", required=True, choices=list(BENCH_REGISTRY))
     parser.add_argument("--api_key", required=True)
     parser.add_argument("--api_base", default=DEFAULT_API_BASE)
     parser.add_argument("--local_base", default=DEFAULT_LOCAL_BASE)
+    parser.add_argument("--local_model", default=None)
+    parser.add_argument("--direct_model", default=None)
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--max_tasks", type=int, default=None)
     parser.add_argument("--gen_workers", type=int, default=16)
     parser.add_argument("--verify_workers", type=int, default=4)
     parser.add_argument("--skip_gen", action="store_true")
     parser.add_argument("--skip_verify", action="store_true")
-    parser.add_argument("--direct_model", default=None, help="API model for direct router")
-    parser.add_argument("--local_model", default=None, help="Local vLLM model name")
-    parser.add_argument("--interactive", action="store_true",
-                        help="Interactive mode: router ↔ Docker multi-turn (TerminalBench only)")
+    parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
 
     if not args.output_dir:
@@ -379,7 +351,3 @@ def main():
     router = build_router(args.router, args)
     bench = build_bench(args.bench, args)
     run_pipeline(router, bench, args)
-
-
-if __name__ == "__main__":
-    main()

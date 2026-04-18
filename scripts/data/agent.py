@@ -1,141 +1,224 @@
-"""Agent execution: multi-turn tool-calling loop for router and teacher.
+"""Agent: Planner-Router-Executor pipeline.
 
-This module handles the core interaction between the orchestrator (router or teacher)
-and sub-models via the delegate_task / finish tool protocol.
+Provides both sync and async entry points, plus a batch runner
+that processes multiple questions concurrently.
 """
 
 from __future__ import annotations
 
-import json
+import asyncio
+import logging
+from typing import Sequence
+
+from openai import AsyncOpenAI, OpenAI
 
 from configs import PoolConfig
+from scripts.data.planner import arun_planner, run_planner
+from scripts.data.router import aroute_subtask, route_subtask
 
-MAX_STEPS = 8
+logger = logging.getLogger(__name__)
 
-
-def build_system_prompt(pools: PoolConfig) -> str:
-    model_list = ", ".join(pools["models"])
-    skill_list = ", ".join(pools["skills"])
-    skill_lines = []
-    for mid, skills in sorted(pools["model_skills"].items()):
-        skill_lines.append(f"  {mid}: [{', '.join(skills)}]")
-
-    return f"""You are a task orchestrator that solves problems by delegating sub-tasks to specialized models.
-
-Available models: {model_list}
-Available skills: {skill_list}
-
-Per-model allowed skills:
-{chr(10).join(skill_lines)}
-
-You have two tools:
-- delegate_task(instruction, model, skill): delegate a sub-task to a model with a specific skill
-- finish(answer): provide your final answer
-
-Think step by step. Pick the cheapest model that can handle each sub-task. When you have enough information, call finish."""
+# Default concurrency for batch runs — tune to vLLM's max_num_seqs
+DEFAULT_CONCURRENCY = 16
 
 
-def build_tools(pools: PoolConfig) -> list[dict]:
-    return [
-        {"type": "function", "function": {
-            "name": "delegate_task",
-            "description": "Delegate a sub-task to a specialized model",
-            "parameters": {"type": "object", "properties": {
-                "instruction": {"type": "string", "description": "What the model should do"},
-                "model": {"type": "string", "enum": pools["models"]},
-                "skill": {"type": "string", "enum": pools["skills"]},
-            }, "required": ["instruction", "model", "skill"]},
-        }},
-        {"type": "function", "function": {
-            "name": "finish",
-            "description": "Provide the final answer",
-            "parameters": {"type": "object", "properties": {
-                "answer": {"type": "string"},
-            }, "required": ["answer"]},
-        }},
-    ]
+def _is_local(api_base: str) -> bool:
+    return "localhost" in api_base or "127.0.0.1" in api_base
 
+
+# ---------------------------------------------------------------------------
+# Sync
+# ---------------------------------------------------------------------------
 
 def run_agent(
     question: str,
-    model: str,
-    api_base: str,
-    api_key: str,
+    planner_model: str,
+    planner_api_base: str,
+    planner_api_key: str,
+    router_model: str,
+    router_api_base: str,
+    router_api_key: str,
     sub_model_api_base: str,
     sub_model_api_key: str,
     pools: PoolConfig,
-    temperature: float = 0.3,
+    planner_temperature: float = 0.7,
+    router_temperature: float = 0.3,
 ) -> dict:
-    """Run a multi-turn agent loop: LLM -> tool call -> sub-model -> return.
-
-    Returns dict with keys: messages, answer, complete, n_delegates, models_used, skills_used.
-    """
-    from openai import OpenAI
-
-    client = OpenAI(base_url=api_base, api_key=api_key, timeout=120)
+    """Run the full Planner → Router → Executor pipeline (sync)."""
     sub_client = OpenAI(base_url=sub_model_api_base, api_key=sub_model_api_key, timeout=60)
-    tools = build_tools(pools)
 
-    messages = [
-        {"role": "system", "content": build_system_prompt(pools)},
-        {"role": "user", "content": question},
-    ]
+    models_used: list[str] = []
+    skills_used: list[str] = []
+    routing_decisions: list[dict] = []
 
-    n_delegates = 0
-    answer = None
-    complete = False
-    models_used = []
-    skills_used = []
+    _extra = {"enable_thinking": False} if not _is_local(sub_model_api_base) else {}
 
-    for _ in range(MAX_STEPS):
+    def execute_subtask(instruction: str, task_id: str) -> str:
+        selected_model, selected_skill = route_subtask(
+            instruction=instruction, model=router_model,
+            api_base=router_api_base, api_key=router_api_key,
+            pools=pools, temperature=router_temperature,
+        )
+        models_used.append(selected_model)
+        skills_used.append(selected_skill)
+        routing_decisions.append({
+            "task_id": task_id, "instruction": instruction,
+            "routed_model": selected_model, "routed_skill": selected_skill,
+        })
         try:
-            resp = client.chat.completions.create(
-                model=model, messages=messages, tools=tools,
-                temperature=temperature, max_tokens=2048,
+            resp = sub_client.chat.completions.create(
+                model=selected_model,
+                messages=[{"role": "user", "content": instruction}],
+                temperature=0.1, max_tokens=1024,
+                extra_body=_extra,
             )
-        except Exception:
-            break
+            result = resp.choices[0].message.content.strip()
+        except Exception as e:
+            result = f"Error: {e}"
+        return f"[routed to {selected_model} / {selected_skill}]\n{result}"
 
-        msg = resp.choices[0].message
+    planner_result = run_planner(
+        question=question, model=planner_model,
+        api_base=planner_api_base, api_key=planner_api_key,
+        execute_subtask_fn=execute_subtask, temperature=planner_temperature,
+    )
+    return _pack(planner_result, models_used, skills_used, routing_decisions)
 
-        if msg.tool_calls:
-            messages.append(msg.model_dump())
-            for tc in msg.tool_calls:
-                name = tc.function.name
-                args = json.loads(tc.function.arguments)
 
-                if name == "finish":
-                    answer = args.get("answer", "")
-                    complete = True
-                    messages.append({"role": "tool", "tool_call_id": tc.id,
-                                     "content": json.dumps({"status": "done"})})
-                    break
-                elif name == "delegate_task":
-                    n_delegates += 1
-                    models_used.append(args.get("model", pools["models"][0]))
-                    skills_used.append(args.get("skill", "direct_answer"))
-                    try:
-                        sub_resp = sub_client.chat.completions.create(
-                            model=args["model"],
-                            messages=[{"role": "user", "content": args["instruction"]}],
-                            temperature=0.1, max_tokens=1024,
-                        )
-                        result = sub_resp.choices[0].message.content.strip()
-                    except Exception as e:
-                        result = f"Error: {e}"
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
-            if complete:
-                break
-        elif msg.content:
-            messages.append({"role": "assistant", "content": msg.content})
-        else:
-            break
+# ---------------------------------------------------------------------------
+# Async
+# ---------------------------------------------------------------------------
 
+async def arun_agent(
+    question: str,
+    planner_model: str,
+    planner_api_base: str,
+    planner_api_key: str,
+    router_model: str,
+    router_api_base: str,
+    router_api_key: str,
+    sub_model_api_base: str,
+    sub_model_api_key: str,
+    pools: PoolConfig,
+    planner_temperature: float = 0.7,
+    router_temperature: float = 0.3,
+) -> dict:
+    """Run the full Planner → Router → Executor pipeline (async)."""
+    sub_client = AsyncOpenAI(
+        base_url=sub_model_api_base, api_key=sub_model_api_key, timeout=60,
+    )
+
+    models_used: list[str] = []
+    skills_used: list[str] = []
+    routing_decisions: list[dict] = []
+
+    _extra_async = {"enable_thinking": False} if not _is_local(sub_model_api_base) else {}
+
+    async def execute_subtask(instruction: str, task_id: str) -> str:
+        selected_model, selected_skill = await aroute_subtask(
+            instruction=instruction, model=router_model,
+            api_base=router_api_base, api_key=router_api_key,
+            pools=pools, temperature=router_temperature,
+        )
+        models_used.append(selected_model)
+        skills_used.append(selected_skill)
+        routing_decisions.append({
+            "task_id": task_id, "instruction": instruction,
+            "routed_model": selected_model, "routed_skill": selected_skill,
+        })
+        try:
+            resp = await sub_client.chat.completions.create(
+                model=selected_model,
+                messages=[{"role": "user", "content": instruction}],
+                temperature=0.1, max_tokens=1024,
+                extra_body=_extra_async,
+            )
+            result = resp.choices[0].message.content.strip()
+        except Exception as e:
+            result = f"Error: {e}"
+        return f"[routed to {selected_model} / {selected_skill}]\n{result}"
+
+    planner_result = await arun_planner(
+        question=question, model=planner_model,
+        api_base=planner_api_base, api_key=planner_api_key,
+        execute_subtask_fn=execute_subtask, temperature=planner_temperature,
+    )
+    return _pack(planner_result, models_used, skills_used, routing_decisions)
+
+
+# ---------------------------------------------------------------------------
+# Batch (concurrent)
+# ---------------------------------------------------------------------------
+
+async def arun_agent_batch(
+    questions: Sequence[str],
+    planner_model: str,
+    planner_api_base: str,
+    planner_api_key: str,
+    router_model: str,
+    router_api_base: str,
+    router_api_key: str,
+    sub_model_api_base: str,
+    sub_model_api_key: str,
+    pools: PoolConfig,
+    planner_temperature: float = 0.7,
+    router_temperature: float = 0.3,
+    concurrency: int = DEFAULT_CONCURRENCY,
+) -> list[dict]:
+    """Run multiple questions concurrently with a semaphore.
+
+    Each sample's internal pipeline is still sequential (planner → router →
+    executor), but different samples run in parallel up to *concurrency*.
+    """
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(question: str) -> dict:
+        async with sem:
+            return await arun_agent(
+                question=question,
+                planner_model=planner_model,
+                planner_api_base=planner_api_base,
+                planner_api_key=planner_api_key,
+                router_model=router_model,
+                router_api_base=router_api_base,
+                router_api_key=router_api_key,
+                sub_model_api_base=sub_model_api_base,
+                sub_model_api_key=sub_model_api_key,
+                pools=pools,
+                planner_temperature=planner_temperature,
+                router_temperature=router_temperature,
+            )
+
+    return await asyncio.gather(*[_one(q) for q in questions])
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrappers
+# ---------------------------------------------------------------------------
+
+def run_agent_single(
+    question: str, model: str, api_base: str, api_key: str,
+    sub_model_api_base: str, sub_model_api_key: str,
+    pools: PoolConfig, temperature: float = 0.7,
+) -> dict:
+    """Single-model mode: same model as both planner and router."""
+    return run_agent(
+        question=question,
+        planner_model=model, planner_api_base=api_base, planner_api_key=api_key,
+        router_model=model, router_api_base=api_base, router_api_key=api_key,
+        sub_model_api_base=sub_model_api_base, sub_model_api_key=sub_model_api_key,
+        pools=pools, planner_temperature=temperature,
+    )
+
+
+def _pack(planner_result, models_used, skills_used, routing_decisions):
     return {
-        "messages": messages,
-        "answer": answer,
-        "complete": complete,
-        "n_delegates": n_delegates,
+        "messages": planner_result["messages"],
+        "answer": planner_result["answer"],
+        "complete": planner_result["complete"],
+        "n_delegates": len(models_used),
         "models_used": models_used,
         "skills_used": skills_used,
+        "routing_decisions": routing_decisions,
+        "subtasks": planner_result["subtasks"],
     }

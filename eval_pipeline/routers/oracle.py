@@ -1,15 +1,10 @@
-"""
-Oracle baselines — always use a fixed model (cheapest or strongest).
-Tests: "Does routing beat always picking the best/cheapest model?"
-"""
 import openai
 from .base import BaseRouter, RouteResult
 from ..config import COST_PER_M, EVAL_MAX_TOKENS, DEFAULT_API_BASE, resolve_model
 
 
 class OracleRouter(BaseRouter):
-    """Always route to a fixed model — upper/lower bound baselines."""
-
+    
     def __init__(self, model_id: str, label: str = None,
                  api_base=DEFAULT_API_BASE, api_key="EMPTY"):
         self.model_id = model_id
@@ -45,3 +40,4 @@ def strongest_router(**kw):
 
 def codex_router(**kw):
     return OracleRouter("gpt-5.3-codex", "Codex-Only", **kw)
+SingleRouter = OracleRouter

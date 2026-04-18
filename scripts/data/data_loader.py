@@ -27,7 +27,9 @@ def load_question_pool(recipe: list[dict]) -> list[dict]:
             kw = {"split": entry["split"]}
             if n is not None:
                 kw["streaming"] = True
-            if "hf_subset" in entry:
+            if "parquet_pattern" in entry:
+                ds = load_dataset("parquet", data_files=entry["parquet_pattern"], **kw)
+            elif "hf_subset" in entry:
                 ds = load_dataset(entry["hf_path"], entry["hf_subset"], **kw)
             else:
                 ds = load_dataset(entry["hf_path"], **kw)
@@ -65,9 +67,13 @@ def _extract_qa(name: str, row: dict) -> tuple[str, str]:
         return row.get("question", ""), m.group(1).strip() if m else ""
 
     if "numinamath" in name:
+        problem = row.get("problem", "")
+        # Skip proof questions — no numerical answer for the pipeline
+        if re.search(r'\bProve\b|\bprove\b|\bShow that\b|\bshow that\b', problem):
+            return "", ""
         sol = row.get("solution", "")
         m = re.findall(r'\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}', sol)
-        return row.get("problem", ""), m[-1] if m else ""
+        return problem, m[-1] if m else ""
 
     if "dapo" in name:
         prompt = row.get("prompt", [])

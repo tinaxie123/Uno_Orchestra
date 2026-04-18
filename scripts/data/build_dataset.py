@@ -1,19 +1,4 @@
-"""
-Build final SFT training dataset from Step 1 output (sft.jsonl).
-
-Step 2 of the data pipeline:
-  - Re-filters: token budget, delegate count, gold answer present
-  - Converts to parquet for LlamaFactory
-  - Outputs stats for sanity checks
-
-Usage:
-    python scripts/data/build_dataset.py \
-        --input data/sft/sft.jsonl \
-        --output data/sft/train.parquet
-"""
-
 from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -22,11 +7,9 @@ from collections import Counter
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 
-# --- Filter thresholds ---
-MAX_TOKENS = 8192       # must match SFT cutoff_len
-MAX_DELEGATES = 8       # max delegate_task calls per trajectory
-MAX_TURNS = 20          # max conversation turns
-
+MAX_TOKENS = 8192      
+MAX_DELEGATES = 8     
+MAX_TURNS = 20          
 
 def estimate_tokens(conversations: list[dict]) -> int:
     total_chars = sum(len(str(c.get("value", ""))) for c in conversations)
@@ -34,25 +17,17 @@ def estimate_tokens(conversations: list[dict]) -> int:
 
 
 def filter_sample(sample: dict) -> tuple[bool, str | None]:
-    """Return (keep, drop_reason)."""
     convs = sample.get("conversations", [])
     if not convs:
         return False, "no_conversations"
-
     if not sample.get("gold_answer"):
         return False, "no_gold"
-
-    # Token budget
     est = sample.get("est_tokens") or estimate_tokens(convs)
     if est > MAX_TOKENS:
         return False, "overlong"
-
-    # Delegate count
     n_delegates = sample.get("n_delegates", 0)
     if n_delegates > MAX_DELEGATES:
         return False, "too_many_delegates"
-
-    # Turn count
     if len(convs) > MAX_TURNS:
         return False, "too_many_turns"
 
@@ -69,15 +44,12 @@ def main() -> int:
     if args.stats is None:
         args.stats = args.output.replace(".parquet", "_stats.json")
 
-    # Load
     samples = []
     with open(args.input) as f:
         for line in f:
             if line.strip():
                 samples.append(json.loads(line))
     print(f"Loaded {len(samples)} samples from {args.input}")
-
-    # Filter
     kept = []
     drop_reasons = Counter()
     for s in samples:
@@ -91,8 +63,6 @@ def main() -> int:
     if drop_reasons:
         for reason, count in drop_reasons.most_common():
             print(f"  dropped: {reason} = {count}")
-
-    # Stats
     by_source = Counter(s["source"] for s in kept)
     by_domain = Counter(s["domain"] for s in kept)
     model_usage = Counter()
@@ -121,7 +91,6 @@ def main() -> int:
         "avg_tokens": round(sum(s.get("est_tokens", 0) for s in kept) / max(len(kept), 1), 1),
     }
 
-    # Write parquet
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     try:
         import pandas as pd
@@ -129,20 +98,16 @@ def main() -> int:
         df.to_parquet(args.output, index=False)
         print(f"Wrote {len(kept)} samples to {args.output}")
     except ImportError:
-        # Fallback to jsonl
         fallback = args.output.replace(".parquet", ".jsonl")
         with open(fallback, "w") as f:
             for s in kept:
                 f.write(json.dumps(s, ensure_ascii=False) + "\n")
         print(f"pandas not available; wrote {len(kept)} samples to {fallback}")
 
-    # Write stats
     with open(args.stats, "w") as f:
         json.dump(stats, f, indent=2)
     print(f"Stats: {args.stats}")
 
-    # Summary
-    print(f"\n{'='*50}")
     print(f"Samples: {stats['n_kept']}")
     print(f"Sources: {stats['by_source']}")
     print(f"Avg delegates/sample: {stats['avg_delegates']}")

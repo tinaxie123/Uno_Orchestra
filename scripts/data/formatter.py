@@ -1,9 +1,6 @@
-"""Output formatting: convert agent trajectories to ShareGPT format for LlamaFactory."""
 
 from __future__ import annotations
-
 import json
-
 MAX_TRAINING_TOKENS = 8192
 
 

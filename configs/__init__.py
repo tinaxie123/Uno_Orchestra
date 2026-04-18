@@ -1,12 +1,7 @@
 from __future__ import annotations
-
-"""Shared config loader for `configs/pools.yaml`."""
-
 import os
 from typing import Any, TypedDict
-
 import yaml
-
 
 class PoolConfig(TypedDict):
     models: list[str]
@@ -18,10 +13,8 @@ class PoolConfig(TypedDict):
     policy_models: list[str]
     raw: dict[str, Any]
 
-
 _POOLS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pools.yaml")
 _CACHE_BY_PATH: dict[str, PoolConfig] = {}
-
 
 def _normalize_skill_ids(raw_skills: list[Any], path: str) -> list[str]:
     skill_ids: list[str] = []
@@ -31,7 +24,6 @@ def _normalize_skill_ids(raw_skills: list[Any], path: str) -> list[str]:
             raise ValueError(f"{path}: skills[{index}] has empty id")
         skill_ids.append(skill_id)
     return skill_ids
-
 
 def _validate_config(cfg: dict[str, Any], path: str) -> None:
     if not cfg.get("models"):

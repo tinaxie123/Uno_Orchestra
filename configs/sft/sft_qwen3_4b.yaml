@@ -9,7 +9,7 @@ finetuning_type: full
 deepspeed: examples/deepspeed/ds_z2_config.json
 
 ### dataset
-dataset: router_sft_v2
+dataset: 
 template: qwen
 cutoff_len: 8192
 preprocessing_num_workers: 16

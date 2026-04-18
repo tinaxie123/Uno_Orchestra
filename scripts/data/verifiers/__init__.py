@@ -1,9 +1,3 @@
-"""Per-dataset answer verifiers for the data generation pipeline.
-
-Each verifier takes (pred, gold) and returns bool.
-The dispatch function `verify(pred, gold, source)` routes to the correct one.
-"""
-
 from __future__ import annotations
 
 from scripts.data.verifiers.math_verifier import verify_math

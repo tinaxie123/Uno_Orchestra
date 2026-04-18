@@ -2,57 +2,120 @@ policy_models:
   - Qwen/Qwen3-4B
   - Qwen/Qwen2.5-7B-Instruct
 models:
+  - id: gemini-2.5-flash-lite
+    usd_per_1m_output: 0.30
+    description: >
+      Google's ultra-affordable model optimized for low latency and cost efficiency.
+      1M token context window with full multimodal support (text, image, audio, video).
+      Thinking is disabled by default to prioritize speed. Best for high-volume,
+      cost-sensitive tasks like classification, extraction, and simple Q&A.
+      Limited reasoning and coding capability.
+    allowed_skills: [direct_answer, web_search, read_document, extract_field]
+
   - id: gemini-2.5-flash
     usd_per_1m_output: 0.60
+    description: >
+      Google's fastest and most budget-friendly model in the 2.5 family. Delivers ~201 tokens/sec
+      with a 1M token context window. Supports text, image, audio, and video inputs.
+      Strong at summarization, chatbots, and production pipelines. Results close to Pro quality
+      at a fraction of the cost. Improved agentic tool use with 5% gain on SWE-Bench.
+      Not suited for complex symbolic math or deep multi-step reasoning.
     allowed_skills: [direct_answer, web_search, read_document, extract_field]
 
   - id: kimi-k2.5
     usd_per_1m_output: 2.50
+    description: >
+      Moonshot AI's open-source MoE model (1T total params, 32B active per request).
+      Trained on 15T tokens mixing visual and textual data from the start.
+      Supports four modes: Instant, Thinking, Agent, and Agent Swarm (up to 100 parallel sub-agents).
+      Strong at coding (outperforms Gemini 3 Pro on SWE-Bench Multilingual), document processing,
+      and research. Excellent Chinese language support. Lacks dedicated symbolic math skill.
     allowed_skills: [direct_answer, reason, web_search, read_document, extract_field, fact_check]
 
   - id: qwen3.6-plus
     usd_per_1m_output: 3.00
+    description: >
+      Alibaba's flagship model (April 2026). Hybrid architecture combining linear attention
+      with sparse MoE routing. 1M token context window. Matches Claude Opus 4.5 on
+      SWE-bench and Terminal-Bench 2.0. Reasoning is active by default on every prompt.
+      Strong all-rounder for agentic coding, symbolic math, multi-step reasoning, and
+      multimodal code generation. Best cost-performance ratio for most tasks.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
-  - id: claude-haiku-4-5-20251001
+  - id: gemini-3-flash-preview
     usd_per_1m_output: 4.00
-    allowed_skills: [direct_answer, web_search, read_document, extract_field, symbolic_math]
-
-  - id: gemini-3.1-pro-preview
-    usd_per_1m_output: 12.00
+    description: >
+      Google's high-speed thinking model combining Gemini 3 Pro's reasoning with Flash-line
+      latency and efficiency. 1M token context window. Configurable reasoning via thinking
+      levels (minimal/low/medium/high) to balance quality, latency, and cost.
+      Near-Pro-level reasoning and tool use with substantially lower latency.
+      Broad improvements over 2.5 Flash in reasoning, multimodal understanding, and reliability.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
 
   - id: gpt-5.3-codex
     usd_per_1m_output: 14.00
+    description: >
+      OpenAI's advanced agentic coding model (Feb 2026). 25% faster than GPT-5.2-Codex.
+      Tops SWE-Bench Pro and Terminal-Bench 2.0. Built for the full software lifecycle:
+      debugging, deploying, monitoring, writing PRDs, tests, and metrics.
+      Excels at precise symbolic computation, code generation, and structured output.
+      Provides real-time interactive updates during execution.
     allowed_skills: [direct_answer, symbolic_math, execute_python, execute_shell, call_api, read_code, parse_structured]
 
   - id: gpt-5.4
     usd_per_1m_output: 15.00
+    description: >
+      OpenAI's most capable frontier model (March 2026). 1M token context window.
+      Native computer-use capabilities. Scores 57.7% on SWE-bench Pro, 75% on OSWorld,
+      83% on GDPval. Most token-efficient reasoning model from OpenAI. Unified architecture
+      for coding, reasoning, and computer use. Use for hard problems where cheaper models fail.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
   - id: claude-sonnet-4-6
     usd_per_1m_output: 15.00
+    description: >
+      Anthropic's fast frontier model. 79.6% on SWE-bench Verified (nearly matching Opus at 80.8%).
+      40-60 tokens/sec with 64K output limit. 72%+ on autonomous computer use.
+      Thinks between tool calls for more reliable agentic workflows. 40% cheaper than Opus.
+      Ideal for routine coding, classification, and multi-step agent tasks at frontier quality.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
- 
   - id: claude-opus-4-6
     usd_per_1m_output: 75.00
+    description: >
+      Anthropic's most capable model. 80.8% on SWE-bench Verified. 1M token context window
+      with 128K output limit. 20-30 tokens/sec. Thinks between tool calls for reliable
+      multi-step reasoning. Best-in-class for the hardest agentic tasks, complex code review,
+      and long-context analysis. Very expensive — reserve for tasks where all other models fail.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
 skills:
   - id: direct_answer
+    description: "Answer the question directly without special tools."
   - id: reason
+    description: "Multi-step logical reasoning or chain-of-thought analysis."
   - id: web_search
+    description: "Search the web for up-to-date or factual information."
   - id: database_query
+    description: "Query a structured database (SQL or similar)."
   - id: read_document
+    description: "Read and comprehend a long document or passage."
   - id: read_code
+    description: "Read and understand source code."
   - id: extract_field
+    description: "Extract specific fields or values from structured/unstructured text."
   - id: parse_structured
+    description: "Parse structured formats (JSON, XML, tables, etc.)."
   - id: symbolic_math
+    description: "Solve math problems symbolically (algebra, calculus, number theory)."
   - id: execute_python
+    description: "Write and execute Python code to compute a result."
   - id: execute_shell
+    description: "Run shell commands for system-level tasks."
   - id: fact_check
+    description: "Verify factual claims against known information."
   - id: call_api
+    description: "Call an external API endpoint."
 
 pool_ablations:
   no_frontier:
@@ -60,4 +123,4 @@ pool_ablations:
   minimal:
     include: [gemini-2.5-flash, qwen3.6-plus, gpt-5.4]
   mid_only:
-    include: [qwen3.6-plus, claude-haiku-4-5-20251001, gemini-3.1-pro-preview]
+    include: [qwen3.6-plus, gemini-3-flash-preview, gpt-5.3-codex]

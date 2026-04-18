@@ -1,16 +1,27 @@
 """
 Terminal-Bench 2.0 benchmark adapter.
-Supports two modes:
-1. One-shot: generate solution text → extract commands → execute in Docker → verify
-2. Interactive: router ↔ Docker multi-turn loop (execute_shell/execute_python via real Docker)
+
+Architecture (following AOrchestra):
+  TerminalBench (BaseBenchmark)
+    └── interactive_verify() — multi-turn: router ↔ Docker
+          └── DockerExecutor — container lifecycle, exec, test, cleanup
+                └── DockerComposeManager — compose up/down, signal handling
+
+Two modes:
+  1. Interactive: router ↔ Docker multi-turn with real shell feedback (primary)
+  2. One-shot: router generates commands → execute → verify (fallback)
 """
+import asyncio
 import os
 import re
 import json
 import glob
 import subprocess
 import time
-from typing import List
+import logging
+from pathlib import Path
+from typing import List, Optional
+
 from .base import BaseBenchmark, Task, VerifyResult
 
 try:
@@ -18,173 +29,180 @@ try:
 except ImportError:
     import tomli as tomllib
 
+logger = logging.getLogger(__name__)
+
 HARBOR_TASKS_DIR = "/home/xieht/.cache/harbor/tasks/packages/terminal-bench"
-TASKS_JSON = "/data/xieht/terminal_bench_tasks.json"
+COMPOSE_YAML = Path(__file__).parent.parent / "executors" / "docker-compose-build.yaml"
 
-# Skills that should execute in Docker rather than call LLM API
-EXEC_SKILLS = {"execute_shell", "execute_python"}
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# System prompt for interactive mode
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+INTERACTIVE_SYSTEM_PROMPT = """\
+You are completing a terminal/systems task inside a Docker container.
+Execute shell commands step by step to accomplish the task.
+
+Respond with EXACTLY this format each turn:
+
+DISCUSSION
+<your step-by-step reasoning>
+COMMAND
+<single shell command>
+
+When the task is complete:
+
+DISCUSSION
+<summary of what you accomplished>
+COMMAND
+finish
+
+RULES:
+- ONE command per turn. Wait for output before the next step.
+- You are root. The working directory is set by the container.
+- For package installs: use DEBIAN_FRONTEND=noninteractive and -y flags.
+- If dpkg lock error: run `kill $(lsof -t /var/lib/dpkg/lock-frontend) 2>/dev/null; rm -f /var/lib/dpkg/lock*` first.
+- Before installing, check if tools exist: `which <tool>` or `command -v <tool>`.
+- Prefer pip/conda over apt when possible (faster, fewer lock issues).
+- Long commands: chain with && to avoid partial failure.
+- If a command times out, try a simpler alternative.
+"""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TerminalBench benchmark
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class TerminalBench(BaseBenchmark):
 
-    def __init__(self, tasks_file=TASKS_JSON, harbor_dir=HARBOR_TASKS_DIR,
-                 agent_timeout=600, verifier_timeout=900):
-        self.tasks_file = tasks_file
+    def __init__(self, harbor_dir=HARBOR_TASKS_DIR,
+                 max_steps=30, docker_timeout=600, verifier_timeout=900):
         self.harbor_dir = harbor_dir
-        self.agent_timeout = agent_timeout
+        self.max_steps = max_steps
+        self.docker_timeout = docker_timeout
         self.verifier_timeout = verifier_timeout
+        # Lazy-init docker manager (only when interactive mode is used)
+        self._docker_manager = None
 
     @property
     def name(self):
         return "Terminal-Bench-2.0"
 
+    def _get_docker_manager(self):
+        if self._docker_manager is None:
+            from ..executors import DockerComposeManager
+            self._docker_manager = DockerComposeManager(COMPOSE_YAML)
+        return self._docker_manager
+
+    # ─── Task loading ───────────────────────────────────────────
+
     def load(self, max_tasks=None) -> List[Task]:
-        raw_tasks = json.load(open(self.tasks_file))
-        if max_tasks:
-            raw_tasks = raw_tasks[:max_tasks]
+        """Load tasks directly from harbor cache (instruction.md + task.toml)."""
         tasks = []
-        for t in raw_tasks:
-            instruction = t.get("instruction", "")
-            question = (
-                f"You are given a terminal/systems programming task. "
-                f"Provide the complete executable solution.\n\n"
-                f"Task: {instruction}\n\n"
-                f"Provide all commands and code needed."
-            )
+        for task_dir_name in sorted(os.listdir(self.harbor_dir)):
+            task_base = os.path.join(self.harbor_dir, task_dir_name)
+            if not os.path.isdir(task_base):
+                continue
+            sub_dirs = glob.glob(os.path.join(task_base, "*/task.toml"))
+            if not sub_dirs:
+                continue
+            task_dir = os.path.dirname(sub_dirs[0])
+
+            # Read instruction
+            instr_path = os.path.join(task_dir, "instruction.md")
+            instruction = ""
+            if os.path.exists(instr_path):
+                instruction = open(instr_path).read().strip()
+            if not instruction:
+                continue
+
+            # Read task.toml
+            with open(os.path.join(task_dir, "task.toml"), "rb") as f:
+                config = tomllib.load(f)
+
             tasks.append(Task(
-                task_id=t["task_id"], raw=t, question=question,
+                task_id=task_dir_name,
+                raw={"config": config, "task_dir": task_dir},
+                question=f"Task: {instruction}",
                 context={"task_instruction": instruction},
             ))
+
+            if max_tasks and len(tasks) >= max_tasks:
+                break
         return tasks
 
     def extract_answer(self, router_output: str, task: Task) -> str:
         return router_output
 
-    def _get_task_config(self, task_id):
-        toml_files = glob.glob(f"{self.harbor_dir}/{task_id}/*/task.toml")
-        if not toml_files:
-            return None, None
-        path = toml_files[0]
-        with open(path, "rb") as f:
-            config = tomllib.load(f)
-        return config, os.path.dirname(path)
-
-    def _extract_commands(self, answer):
-        """Extract executable bash from any router output format."""
-        text = answer
-
-        # Router-R1: extract from <information> blocks
-        info_blocks = re.findall(r"<information>(.*?)</information>", text, re.DOTALL)
-        if info_blocks:
-            text = "\n".join(info_blocks)
-
-        # SkillRouter-SFT: extract from <obs> blocks + <final_answer>
-        obs_blocks = re.findall(r"<obs[^>]*>(.*?)</obs>", text, re.DOTALL)
-        if obs_blocks:
-            final = re.search(r"<final_answer>(.*?)</final_answer>", answer, re.DOTALL)
-            text = "\n".join(obs_blocks)
-            if final:
-                text += "\n" + final.group(1)
-
-        # Strip XML tags
-        text = re.sub(r"</?(?:think|search|answer|plan|route|subtask|verify|final_answer|obs|information)[^>]*>", "", text)
-        text = re.sub(r"\[/?(?:ASSISTANT|TOOL)\]", "", text)
-
-        # Extract bash blocks
-        blocks = re.findall(r"```(?:bash|sh|shell)?\s*\n(.*?)```", text, re.DOTALL)
-        if blocks:
-            return "\n".join(blocks)
-
-        # Extract python blocks
-        py_blocks = re.findall(r"```(?:python)\s*\n(.*?)```", text, re.DOTALL)
-        if py_blocks:
-            return "\n".join(f"python3 << 'PYEOF'\n{pb}\nPYEOF" for pb in py_blocks)
-
-        # Fallback: extract command-like lines
-        lines = []
-        for line in text.split("\n"):
-            s = line.strip()
-            if s and not s.startswith("#") and any(s.startswith(c) for c in [
-                "sudo", "apt", "pip", "make", "gcc", "g++", "cd ", "mkdir",
-                "wget", "curl", "git ", "chmod", "cp ", "mv ", "echo ", "export",
-                "python", "npm", "cargo", "cmake", "tar ", "unzip", "sed ",
-                "cat ", "tee ", "source", "docker", "dnf", "yum", "./",
-            ]):
-                lines.append(s)
-        return "\n".join(lines) if lines else text
-
-    # ─────────────────────────────────────────────────────────────
-    # Interactive mode: router ↔ Docker multi-turn execution
-    # ─────────────────────────────────────────────────────────────
+    # ─── Interactive mode: router ↔ Docker (AOrchestra style) ──
 
     def interactive_verify(self, task: Task, router, logs_dir=None) -> VerifyResult:
         """
-        Multi-turn interactive evaluation:
-        1. Start Docker container from task image
-        2. Router generates <plan> + <route>
-        3. For execute_shell/execute_python skills: run command in Docker, return real stdout as <obs>
-        4. For other skills: call LLM API as usual
-        5. Router sees <obs>, generates <verify> + <final_answer> or next <plan>
-        6. Repeat until done or max rounds
-        7. Run test.sh to verify
+        Multi-turn interactive evaluation using AOrchestra's executor:
+        1. Start container via docker-compose (supports prebuilt image + Dockerfile build)
+        2. Router outputs DISCUSSION + COMMAND
+        3. Command executes in container → real output returned
+        4. Repeat until 'finish' or max_steps
+        5. Run test.sh via executor → read reward
         """
-        from ..routers.base import RouteResult
-        from ..config import COST_PER_M, EVAL_MAX_TOKENS, SUB_AGENT_TEMP, resolve_model
-        import openai
+        # Create a new event loop for this thread (ThreadPoolExecutor doesn't have one)
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self._async_interactive_verify(task, router, logs_dir)
+            )
+        finally:
+            loop.close()
 
-        config, task_dir = self._get_task_config(task.task_id)
+    async def _async_interactive_verify(self, task: Task, router, logs_dir=None) -> VerifyResult:
+        from ..executors import DockerExecutor
+
+        # Parse task config
+        config = task.raw.get("config", {})
+        task_dir = Path(task.raw.get("task_dir", ""))
         if not config:
-            return VerifyResult(task.task_id, 0.0, error=f"No config for {task.task_id}")
+            # Fallback: load from harbor
+            config, task_dir_str = self._get_task_config(task.task_id)
+            if not config:
+                return VerifyResult(task.task_id, 0.0, error=f"No config for {task.task_id}")
+            task_dir = Path(task_dir_str)
 
-        env_cfg = config.get("environment", {})
-        docker_image = env_cfg.get("docker_image", "")
-        if not docker_image:
-            return VerifyResult(task.task_id, 0.0, error="No docker_image")
+        # Setup log directories
+        task_logs = Path(logs_dir or "/tmp") / task.task_id
+        verifier_logs = task_logs / "verifier"
+        agent_logs = task_logs / "agent"
+        verifier_logs.mkdir(parents=True, exist_ok=True)
+        agent_logs.mkdir(parents=True, exist_ok=True)
 
-        tests_dir = os.path.join(task_dir, "tests")
-        if not os.path.isdir(tests_dir):
-            return VerifyResult(task.task_id, 0.0, error="No tests dir")
-
-        container = f"eval_{task.task_id}_{int(time.time())}"
-        task_logs = os.path.join(logs_dir or "/tmp", task.task_id)
-        verifier_logs = os.path.join(task_logs, "verifier")
-        os.makedirs(verifier_logs, exist_ok=True)
-
-        cpus = env_cfg.get("cpus", 1)
-        mem = env_cfg.get("memory_mb", 2048)
-        v_timeout = int(config.get("verifier", {}).get("timeout_sec", self.verifier_timeout))
         log = ""
-        total_cost = 0.0
 
-        # Regex for parsing SkillRouter schema
-        ROUTE_RE = re.compile(
-            r'<route[^>]*model="([^"]+)"[^>]*skill="([^"]+)"[^>]*>(.*?)</route>', re.DOTALL)
-        FINAL_RE = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
+        # Create executor (AOrchestra's DockerExecutor)
+        executor = DockerExecutor(
+            task_id=task.task_id,
+            task_dir=task_dir,
+            task_config=config,
+            verifier_logs_dir=verifier_logs,
+            agent_logs_dir=agent_logs,
+            docker_manager=self._get_docker_manager(),
+            docker_timeout=self.docker_timeout,
+        )
+
+        CMD_RE = re.compile(r"COMMAND\s*\n(.+?)(?:\n\n|\Z)", re.DOTALL)
 
         try:
-            # Start container
-            subprocess.run(["docker", "pull", docker_image], capture_output=True, timeout=300)
-            rc = subprocess.run([
-                "docker", "run", "-d", "--name", container,
-                "--cpus", str(cpus), "--memory", f"{mem}m",
-                "-v", f"{verifier_logs}:/logs/verifier",
-                docker_image, "sleep", str(v_timeout + 300),
-            ], capture_output=True, text=True, timeout=60)
-            if rc.returncode != 0:
-                return VerifyResult(task.task_id, 0.0, error=f"docker run: {rc.stderr[:300]}")
+            # Start container (docker-compose: supports Dockerfile build + prebuilt)
+            await executor.start_container()
 
-            # Build initial prompt
-            system_prompt = getattr(router, 'system_prompt', '')
+            # Build messages
             instruction = task.context.get("task_instruction", task.question)
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": instruction})
+            messages = [
+                {"role": "system", "content": INTERACTIVE_SYSTEM_PROMPT},
+                {"role": "user", "content": f"## Task\n{instruction}"},
+            ]
 
             # Multi-turn loop
-            max_rounds = 3
-            for round_idx in range(max_rounds):
-                # Get router output
+            for step in range(self.max_steps):
+                # Router generates next action
                 try:
                     resp = router.local.chat.completions.create(
                         model=router.model_name,
@@ -194,129 +212,64 @@ class TerminalBench(BaseBenchmark):
                     )
                     assistant_text = resp.choices[0].message.content or ""
                 except Exception as e:
-                    log += f"\n[ROUTER ERROR round {round_idx}: {e}]"
+                    log += f"\n[ROUTER ERROR step {step}: {e}]"
                     break
 
-                log += f"\n[ROUND {round_idx+1} ASSISTANT]\n{assistant_text[:500]}\n"
                 messages.append({"role": "assistant", "content": assistant_text})
+                log += f"\n[STEP {step+1}] ASSISTANT:\n{assistant_text[:500]}\n"
 
-                # Check for final_answer (lazy mode or after verify pass)
-                if FINAL_RE.search(assistant_text):
+                # Parse COMMAND
+                cmd_match = CMD_RE.search(assistant_text)
+                if not cmd_match:
+                    log += "[NO COMMAND FOUND]\n"
                     break
 
-                # Parse routes
-                routes = ROUTE_RE.findall(assistant_text)
-                if not routes:
+                command = cmd_match.group(1).strip().split("\n")[0].strip()
+
+                if command.lower() == "finish":
+                    log += "[FINISH]\n"
                     break
 
-                obs_parts = []
-                for model, skill, query in routes:
-                    if skill in EXEC_SKILLS:
-                        # Execute in Docker directly
-                        cmd = query.strip()
-                        if skill == "execute_python":
-                            script = f"python3 << 'PYEOF'\n{cmd}\nPYEOF"
-                            cmd = script
-                        try:
-                            ep = subprocess.run(
-                                ["docker", "exec", container, "bash", "-c", cmd],
-                                capture_output=True, text=True, timeout=120,
-                            )
-                            result = ep.stdout[-1500:] if ep.stdout else ""
-                            if ep.stderr:
-                                result += f"\nSTDERR: {ep.stderr[-500:]}"
-                            if ep.returncode != 0:
-                                result += f"\n[exit code: {ep.returncode}]"
-                        except subprocess.TimeoutExpired:
-                            result = "[command timed out after 120s]"
-                        obs_parts.append(result)
-                    else:
-                        # For non-execution skills: call LLM, then ALSO execute
-                        # any bash/python commands found in the LLM response
-                        actual_model = resolve_model(model)
-                        try:
-                            sr = router.api.chat.completions.create(
-                                model=actual_model,
-                                messages=[{"role": "user", "content": (
-                                    f"Task: {instruction}\n"
-                                    f"Sub-task: {query}\n"
-                                    f"Provide executable bash commands. Use ```bash ... ``` blocks."
-                                )}],
-                                temperature=SUB_AGENT_TEMP,
-                                max_tokens=EVAL_MAX_TOKENS,
-                            )
-                            llm_response = sr.choices[0].message.content or ""
-                            toks = getattr(sr.usage, "completion_tokens", 0) or 0
-                            total_cost += COST_PER_M.get(model, 10.0) * max(toks, 1) / 1e6
-                        except Exception as e:
-                            llm_response = f"API error: {str(e)[:200]}"
+                # Execute in Docker via executor (async, proper timeout)
+                output, exit_code = await executor.execute_command(command, timeout=300)
+                output = output[-2000:]  # truncate
 
-                        # Extract and execute commands from LLM response
-                        cmds = self._extract_commands(llm_response)
-                        if cmds and cmds != llm_response:
-                            try:
-                                ep = subprocess.run(
-                                    ["docker", "exec", container, "bash", "-c", cmds],
-                                    capture_output=True, text=True, timeout=120,
-                                )
-                                exec_result = ep.stdout[-800:] if ep.stdout else ""
-                                if ep.stderr:
-                                    exec_result += f"\nSTDERR: {ep.stderr[-300:]}"
-                                result = f"{llm_response[:500]}\n[EXECUTED]\n{exec_result}"
-                            except subprocess.TimeoutExpired:
-                                result = f"{llm_response[:500]}\n[EXECUTED] timeout"
-                        else:
-                            result = llm_response
-                        obs_parts.append(result)
+                obs = f"[Step {step+1}/{self.max_steps}] exit_code={exit_code}\n{output}"
+                log += f"[STEP {step+1}] CMD: {command}\n[OUTPUT] {output[:500]}\n"
+                messages.append({"role": "user", "content": obs})
 
-                # Build obs and feed back to router
-                obs_content = "\n".join(
-                    f'<obs subtask="{i+1}">{obs}</obs>' for i, obs in enumerate(obs_parts)
-                )
-                log += f"\n[ROUND {round_idx+1} OBS]\n{obs_content[:500]}\n"
-                messages.append({"role": "user", "content": obs_content})
+                # Log command to agent log file
+                cmd_log = agent_logs / "commands.log"
+                with cmd_log.open("a") as f:
+                    f.write(f"[Step {step+1}] {command}\nExit: {exit_code}\n{output[:1000]}\n{'-'*60}\n")
 
-            # Run verification test.sh
-            subprocess.run(["docker", "cp", tests_dir, f"{container}:/tests"],
-                           capture_output=True, timeout=30)
-            subprocess.run(["docker", "exec", container, "mkdir", "-p", "/logs/verifier"],
-                           capture_output=True, timeout=10)
-            tp = subprocess.run(
-                ["docker", "exec", container, "bash", "/tests/test.sh"],
-                capture_output=True, text=True, timeout=v_timeout,
-            )
-            log += f"\n[VERIFIER]\nstdout: {tp.stdout[-500:]}\nstderr: {tp.stderr[-500:]}\n"
+            # Run verification tests via executor
+            reward = await executor.run_tests()
+            log += f"\n[VERIFIER] reward={reward}\n"
 
-            # Read reward
-            reward_file = os.path.join(verifier_logs, "reward.txt")
-            if not os.path.exists(reward_file):
-                subprocess.run(
-                    ["docker", "cp", f"{container}:/logs/verifier/reward.txt", reward_file],
-                    capture_output=True, timeout=10,
-                )
-            if os.path.exists(reward_file):
-                try:
-                    reward = float(open(reward_file).read().strip())
-                except ValueError:
-                    reward = 0.0
-            else:
-                reward = 0.0
+            # Save trace
+            with (task_logs / "trace.log").open("w") as f:
+                f.write(log)
 
-            return VerifyResult(task.task_id, reward, log=log[:3000])
+            return VerifyResult(task.task_id, reward, log=log[-3000:])
 
-        except subprocess.TimeoutExpired:
-            return VerifyResult(task.task_id, 0.0, error="Timeout", log=log[:3000])
         except Exception as e:
-            return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[:3000])
+            logger.error(f"[{task.task_id}] interactive_verify failed: {e}")
+            return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[-3000:])
         finally:
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=30)
+            try:
+                await executor.cleanup()
+            except Exception as e:
+                logger.warning(f"[{task.task_id}] cleanup failed: {e}")
 
-    # ─────────────────────────────────────────────────────────────
-    # One-shot mode (for non-interactive routers like Direct/Oracle)
-    # ─────────────────────────────────────────────────────────────
+    # ─── One-shot mode (fallback for non-interactive routers) ──
 
     def verify(self, task: Task, answer: str, logs_dir=None) -> VerifyResult:
-        config, task_dir = self._get_task_config(task.task_id)
+        """One-shot: extract commands from answer → execute in Docker → run test.sh."""
+        config = task.raw.get("config", {})
+        task_dir_str = task.raw.get("task_dir", "")
+        if not config:
+            config, task_dir_str = self._get_task_config(task.task_id)
         if not config:
             return VerifyResult(task.task_id, 0.0, error=f"No config for {task.task_id}")
 
@@ -325,7 +278,7 @@ class TerminalBench(BaseBenchmark):
         if not docker_image:
             return VerifyResult(task.task_id, 0.0, error="No docker_image")
 
-        tests_dir = os.path.join(task_dir, "tests")
+        tests_dir = os.path.join(task_dir_str, "tests")
         if not os.path.isdir(tests_dir):
             return VerifyResult(task.task_id, 0.0, error="No tests dir")
 
@@ -359,7 +312,7 @@ class TerminalBench(BaseBenchmark):
             ep = subprocess.run(
                 ["docker", "exec", container, "bash", "/tmp/solution.sh"],
                 capture_output=True, text=True,
-                timeout=min(self.agent_timeout, 600),
+                timeout=min(self.docker_timeout, 600),
             )
             log += f"AGENT stdout:\n{ep.stdout[-1000:]}\nstderr:\n{ep.stderr[-1000:]}\n"
 
@@ -395,3 +348,40 @@ class TerminalBench(BaseBenchmark):
             return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[:3000])
         finally:
             subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=30)
+
+    # ─── Helpers ───────────────────────────────────────────────
+
+    def _get_task_config(self, task_id):
+        toml_files = glob.glob(f"{self.harbor_dir}/{task_id}/*/task.toml")
+        if not toml_files:
+            return None, None
+        path = toml_files[0]
+        with open(path, "rb") as f:
+            config = tomllib.load(f)
+        return config, os.path.dirname(path)
+
+    def _extract_commands(self, answer):
+        """Extract executable bash from router output (for one-shot mode)."""
+        text = answer
+        text = re.sub(r"</?(?:think|search|answer|plan|route|subtask|verify|final_answer|obs|information)[^>]*>", "", text)
+        text = re.sub(r"\[/?(?:ASSISTANT|TOOL)\]", "", text)
+
+        blocks = re.findall(r"```(?:bash|sh|shell)?\s*\n(.*?)```", text, re.DOTALL)
+        if blocks:
+            return "\n".join(blocks)
+
+        py_blocks = re.findall(r"```(?:python)\s*\n(.*?)```", text, re.DOTALL)
+        if py_blocks:
+            return "\n".join(f"python3 << 'PYEOF'\n{pb}\nPYEOF" for pb in py_blocks)
+
+        lines = []
+        for line in text.split("\n"):
+            s = line.strip()
+            if s and not s.startswith("#") and any(s.startswith(c) for c in [
+                "sudo", "apt", "pip", "make", "gcc", "g++", "cd ", "mkdir",
+                "wget", "curl", "git ", "chmod", "cp ", "mv ", "echo ", "export",
+                "python", "npm", "cargo", "cmake", "tar ", "unzip", "sed ",
+                "cat ", "tee ", "source", "docker", "dnf", "yum", "./",
+            ]):
+                lines.append(s)
+        return "\n".join(lines) if lines else text
