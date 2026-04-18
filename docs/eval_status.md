@@ -1,98 +1,60 @@
-# Evaluation Status Report
+# Baseline Result
 
-**Date**: 2026-04-13
-**Target**: NeurIPS 2026
-**Project**: Learned Selective Delegation for Multi-Agent Systems (SkillRouter)
-
----
-
-## 1. Evaluation Framework
-
-Unified pipeline at `eval_pipeline/` supporting any router × any benchmark.
-
-```
-eval_pipeline/
-├── config.py               # Single source: 9-model pool, cost table, 13 skills
-├── run.py                  # Entry: python -m eval_pipeline.run --router X --bench Y
-├── routers/
-│   ├── base.py             # BaseRouter interface → RouteResult
-│   ├── router_r1.py        # Router-R1 (3B, <think>→<search>→<answer>)
-│   ├── skillrouter_sft.py  # SkillRouter SFT (7B, <plan>→<route>→<obs>→<final_answer>)
-│   ├── direct.py           # Single model, no routing
-│   ├── random_router.py    # Random model selection
-│   └── oracle.py           # Fixed model (cheapest/strongest/codex)
-└── benchmarks/
-    ├── swebench.py         # SWE-bench Verified (swebench harness, official Docker eval)
-    └── terminalbench.py    # Terminal-Bench 2.0 (Harbor Docker, test.sh verification)
-```
-
-**Verification methods** (both official):
 - **SWE-bench**: `swebench.harness.run_evaluation` — batch apply patches in Docker + run test suite
 - **Terminal-Bench**: Harbor Docker — start container from task image → execute solution → run `test.sh` → read `reward.txt`
 
----
+## Baseline Matrix
+                                           pass@1   pass@3                    pass@1   pass@3
+                                            **SWE-bench**                  **Terminal-Bench**
+| **Router-R1**|
+| **Wideseek-R1**|
+|**Single()** |
+|**Single()** |
+|**Single()** |
+| **RouterRL(Qwen2.5-7B-Instruct)Direct** |                  
+| **RouterRL(Qwen3-4B-Instruct)Direct** | 
+｜ **RouterRL(Qwen2.5-7B-Instruct) Random**｜
+| **RouterRL(Qwen3-4B-Instruct) Random** | 
+｜**RouterRL(Qwen2.5-7B-Instruct)+ **|     
+｜**RouterRL(Qwen2.5-7B-Instruct)+claude**| 
+| **RouterRL(Qwen3-4B-Instruct)+** | 
+| **RouterRL(Qwen3-4B-Instruct) claude** |
 
-## 2. Baseline Matrix
 
-| # | Baseline | Type | Model | Pool | Paper Role |
-|---|----------|------|-------|------|------------|
-| 1 | **Direct(Qwen2.5-7B)** | No routing | Qwen2.5-7B-Instruct (base) | — | Shows routing adds value over base model |
-| 2 | **SkillRouter-SFT** | Learned routing + decomposition | Qwen2.5-7B SFT checkpoint | 9 models × 13 skills | Ablation: SFT alone (no RL) |
-| 3 | **Direct(GPT-5.4)** | No routing | GPT-5.4 (strongest) | — | Upper bound: best single model |
-| 4 | **Router-R1** | Learned routing, no decomposition | Router-R1-Qwen2.5-3B | 9 models | External baseline: model-only routing |
-| 5 | **Oracle-Codex** | Fixed routing → code specialist | GPT-5.3-Codex always | — | Is code specialist always best for code tasks? |
-| 6 | **Oracle-Strongest** | Fixed routing → strongest | Claude-Opus-4.6 always | — | Cost upper bound: always pick most expensive |
-| 7 | **Oracle-Cheapest** | Fixed routing → cheapest | Claude-Haiku-4.5 always | — | Quality lower bound: always pick cheapest |
-| 8 | **Random** | Random routing | Random from pool | 9 models | Does learned routing beat random? |
 
-**Missing** (TODO):
-- **SkillRouter-RL** (Phase E checkpoint) — final method, not yet trained
-- **WideSeek-R1** — external MARL baseline
+## Ablation Study
 
----
+| **Router(Qwen2.5-7B-Instruct)Direct** |                  
+| **Router(Qwen3-4B-Instruct)Direct** | 
+｜ **Router(Qwen2.5-7B-Instruct) Random**｜
+| **Router(Qwen3-4B-Instruct) Random** | 
+｜**Router(Qwen2.5-7B-Instruct)+ **|     
+｜**Router(Qwen2.5-7B-Instruct)+claude**| 
+| **Router(Qwen3-4B-Instruct)+** | 
+| **Router(Qwen3-4B-Instruct) claude** |
+| **RouterSFT(Qwen2.5-7B-Instruct)Direct** |                  
+| **RouterSFT(Qwen3-4B-Instruct)Direct** | 
+｜ **RouterSFT(Qwen2.5-7B-Instruct) Random**｜
+| **RouterSFT(Qwen3-4B-Instruct) Random** | 
+｜**RouterSFT(Qwen2.5-7B-Instruct)+ **|     
+｜**RouterSFT(Qwen2.5-7B-Instruct)+claude**| 
+| **RouterSFT(Qwen3-4B-Instruct)+** | 
+| **RouterSFT(Qwen3-4B-Instruct) claude** |
 
-## 3. Current Progress
 
-### 3.1 Generation Phase (Router → predictions)
+### Cost Table 
 
-| Baseline | SWE-bench (500) | Terminal-Bench (89) | Status |
-|----------|:---:|:---:|--------|
-| Router-R1 | 493/500 | 89/89 ✅ | Generation nearly complete |
-| SkillRouter-SFT | 38/500 | 18/89 | **Running on GPU 2** |
-| Direct(Qwen2.5-7B) | 123/500 | 79/89 | **Running on GPU 3** |
-| Direct(GPT-5.4) | 500/500 ✅ | 89/89 ✅ | Complete |
-| Oracle-Codex | 500/500 ✅ | 89/89 ✅ | Complete |
-| Oracle-Strongest | 500/500 ✅ | 89/89 ✅ | Complete |
-| Oracle-Cheapest | 500/500 ✅ | 89/89 ✅ | Complete |
-| Random | 286/500 | 87/89 | Running (API only) |
-
-### 3.2 Verification Phase (Docker execution → real pass rate)
-
-**SWE-bench** (official swebench harness):
-
-| Baseline | Verified | Resolved | Resolved Rate | Cost/Instance |
-|----------|:---:|:---:|:---:|---:|
-| Oracle-Codex | 500 | TBD | TBD | $0.0068 |
-| Oracle-Strongest | 500 | TBD | TBD | $0.0632 |
-| Oracle-Cheapest | 500 | TBD | TBD | ~$0.0000 |
-| Direct(GPT-5.4) | 500 | TBD | TBD | $0.0190 |
-| Router-R1 | pending | — | — | ~$0.015 |
-| Others | pending | — | — | — |
-
-> Note: SWE-bench harness has been invoked for 4 baselines. Results parsing in progress.
-
-**Terminal-Bench** (Docker sandbox execution):
-
-| Baseline | Verified / Total | Passed | Pass Rate |
-|----------|:---:|:---:|:---:|
-| Router-R1 | 14/89 | 0 | 0.0% (in progress) |
-| Oracle-Strongest | 13/89 | 0 | 0.0% (in progress) |
-| Random | 12/89 | 0 | 0.0% (in progress) |
-| Oracle-Cheapest | 10/89 | 0 | 0.0% (in progress) |
-| Direct(GPT-5.4) | 9/89 | 0 | 0.0% (in progress) |
-| Oracle-Codex | 6/89 | 0 | 0.0% (in progress) |
-
-> Note: Terminal-Bench verification is running in pipeline mode (generate + Docker verify concurrently, 24 containers active). 0% pass rate may be expected for single-shot non-agentic approaches — Terminal-Bench tasks require multi-step interactive debugging.
+| Model | $/1M output tokens | Tier |
+|-------|---:|------|
+| claude-haiku-4-5-20251001 | $1.25 | nano |
+| gemini-2.5-flash | $1.50 | nano |
+| kimi-k2.5 | $2.00 | large |
+| qwen3.6-plus | $8.00 | large |
+| gemini-3.1-pro-preview | $10.00 | large |
+| claude-sonnet-4-6 | $15.00 | mid |
+| gpt-5.3-codex | $20.00 | code |
+| gpt-5.4 | $60.00 | large |
+| claude-opus-4-6 | $75.00 | large |
 
 ---
 
@@ -115,23 +77,9 @@ eval_pipeline/
 | SkillRouter-SFT | `/home/xieht/data/sft/checkpoints/router_qwen25_7b_full_sft` | 7B |
 | Qwen2.5-7B-Instruct | `/data/xieht/models/Qwen/Qwen2.5-7B-Instruct-real` | 7B |
 
-### 4.3 Cost Table (aligned with SkillRouter envs.py)
 
-| Model | $/1M output tokens | Tier |
-|-------|---:|------|
-| claude-haiku-4-5-20251001 | $1.25 | nano |
-| gemini-2.5-flash | $1.50 | nano |
-| kimi-k2.5 | $2.00 | large |
-| qwen3.6-plus | $8.00 | large |
-| gemini-3.1-pro-preview | $10.00 | large |
-| claude-sonnet-4-6 | $15.00 | mid |
-| gpt-5.3-codex | $20.00 | code |
-| gpt-5.4 | $60.00 | large |
-| claude-opus-4-6 | $75.00 | large |
 
----
-
-## 5. Key Design Decisions
+## Case Study
 
 ### 5.1 Router-R1 Engineering Fixes (vs original paper)
 
@@ -226,36 +174,3 @@ Accuracy ↑
 - [ ] SWE-bench 0% resolved — expected for single-shot? Or harness issue?
 - [ ] Terminal-Bench 0% pass — expected for non-agentic? Need to check Docker logs
 - [ ] Router-R1 routing diversity — is it still degenerate after prompt fix?
-
----
-
-## 8. Commands Reference
-
-```bash
-cd /data/xieht/multiagentRL
-
-# Run any router × benchmark
-python -m eval_pipeline.run --router ROUTER --bench BENCH --api_key KEY
-
-# Available routers:
-#   router-r1, skillrouter-sft, direct, random,
-#   oracle-cheapest, oracle-strongest, oracle-codex
-
-# Available benchmarks:
-#   swebench, terminalbench
-
-# Options:
-#   --local_base URL        vLLM endpoint for local models
-#   --local_model NAME      vLLM model name
-#   --direct_model NAME     API model for direct router
-#   --gen_workers N         Parallel generation workers
-#   --verify_workers N      Parallel Docker verification workers
-#   --skip_gen              Skip generation, use cached predictions
-#   --skip_verify           Skip verification
-#   --max_tasks N           Limit number of tasks
-
-# Check progress:
-tail -3 /data/xieht/eval_results/ROUTER_BENCH_run.log
-wc -l /data/xieht/eval_results/ROUTER_BENCH/predictions.jsonl
-wc -l /data/xieht/eval_results/ROUTER_BENCH/verification.jsonl
-```
