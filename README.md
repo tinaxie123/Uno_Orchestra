@@ -70,13 +70,12 @@ Verification uses official methods:
 
 | System | Type | Description |
 |--------|------|-------------|
-| Direct(Qwen2.5-7B) | No routing | Base policy model, no delegation |
-| Direct(GPT-5.4) | No routing | Strongest single model upper bound |
-| Oracle-Cheapest | Fixed routing | Always pick cheapest (haiku) |
-| Oracle-Strongest | Fixed routing | Always pick most expensive (opus) |
-| Oracle-Codex | Fixed routing | Always pick code specialist |
-| Random | Random routing | Random model from pool |
-| Router-R1 | Learned routing | External baseline (3B, no decomposition) |
+| |  |  |
+| GPT-5.4 | No routing | Strongest single model upper bound |
+| Cheapest | Fixed routing | Always pick cheapest (haiku) |
+
+| Strongest | Fixed routing | Always pick most expensive (opus) |
+| **SkillRouter-Base**| | Random model from pool |
 | **SkillRouter-SFT** | **Learned routing + decomposition** | Our method (SFT only) |
 | **SkillRouter-RL** | **Learned routing + decomposition + RL** | Our full method |
 
