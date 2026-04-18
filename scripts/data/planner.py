@@ -63,18 +63,19 @@ def _is_local(api_base: str) -> bool:
 
 
 def _make_llm(model: str, api_base: str, api_key: str,
-              temperature: float) -> ChatOpenAI:
+              temperature: float, with_tools: bool = True) -> ChatOpenAI:
     extra = {"max_tokens": PLANNER_MAX_TOKENS}
     if not _is_local(api_base):
         extra["enable_thinking"] = False
-    return ChatOpenAI(
+    llm = ChatOpenAI(
         model=model,
         base_url=api_base,
         api_key=api_key or "none",
         temperature=temperature,
         timeout=120,
         model_kwargs={"extra_body": extra},
-    ).bind_tools(PLANNER_TOOLS)
+    )
+    return llm.bind_tools(PLANNER_TOOLS) if with_tools else llm
 
 
 def _handle_tool_calls(ai_msg, execute_fn_result, subtasks, messages):
@@ -137,12 +138,50 @@ def _serialise_messages(messages: list) -> list[dict]:
 
 
 def _parse_text_tool_call(text: str) -> list[dict] | None:
-    """Fallback: parse <tool_call> tags when vLLM returns them as plain text."""
+    """Fallback: extract tool calls when the model writes them as plain text.
+
+    Handles three formats that weaker models produce:
+    1. <tool_call>{"name": "finish", "arguments": {...}}</tool_call>
+    2. finish(answer)  /  plan_subtask(instruction, task_id)
+    3. Bare JSON: {"name": "finish", "arguments": {...}}
+    """
+    # --- Format 1: <tool_call> tags ---
     m = re.search(r'<tool_call>\s*(\{.+?)(?:</tool_call>|$)', text, re.DOTALL)
+    if m:
+        return _try_parse_json_tool(m.group(1).strip())
+
+    # --- Format 2: finish(...) as plain text ---
+    # Match finish("72"), finish(72), Finish('72'), FINISH(some text)
+    m = re.search(r'\bfinish\(\s*["\']?(.+?)["\']?\s*\)', text, re.IGNORECASE)
+    if m:
+        answer = m.group(1).strip().strip("\"'")
+        return [{"name": "finish", "args": {"answer": answer}, "id": "text_fallback"}]
+
+    # Match plan_subtask("instruction", "task_id") — rare but possible
+    m = re.search(
+        r'\bplan_subtask\(\s*["\'](.+?)["\']'
+        r'(?:\s*,\s*["\'](\w+)["\'])?\s*\)',
+        text, re.DOTALL,
+    )
+    if m:
+        instruction = m.group(1).strip()
+        task_id = m.group(2) or "t1"
+        return [{"name": "plan_subtask",
+                 "args": {"instruction": instruction, "task_id": task_id},
+                 "id": "text_fallback"}]
+
+    # --- Format 3: bare JSON (may contain nested braces) ---
+    m = re.search(r'(\{"name"\s*:\s*"(?:finish|plan_subtask)"[^}]*\{[^}]*\}[^}]*\})', text, re.DOTALL)
     if not m:
-        return None
-    raw = m.group(1).strip()
-    # Fix LaTeX backslashes for JSON parsing
+        m = re.search(r'(\{"name"\s*:\s*"(?:finish|plan_subtask)"[^}]*\})', text, re.DOTALL)
+    if m:
+        return _try_parse_json_tool(m.group(1).strip())
+
+    return None
+
+
+def _try_parse_json_tool(raw: str) -> list[dict] | None:
+    """Try to parse a JSON string as a tool call dict."""
     fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
     for candidate in [raw, fixed]:
         try:
@@ -165,6 +204,36 @@ _NUDGE = HumanMessage(
     content="Now call finish(answer) with the final value, "
             "or plan_subtask() to continue.",
 )
+
+# How many consecutive empty responses before we switch to no-tools fallback
+_MAX_EMPTY_BEFORE_FREEFORM = 2
+
+_FREEFORM_PROMPT = HumanMessage(
+    content="Solve the problem above step by step. "
+            "At the end, write your final answer on its own line as: "
+            "ANSWER: <value>",
+)
+
+
+def _extract_answer_from_text(text: str) -> str | None:
+    """Try to extract a final answer from free-form model text.
+
+    Looks for explicit markers first, then falls back to the last
+    number/expression on its own line.
+    """
+    # Explicit marker: ANSWER: xxx  or  answer: xxx  or  The answer is xxx
+    m = re.search(
+        r'(?:ANSWER|answer|Answer|the answer is)[:\s]+(.+?)(?:\n|$)', text,
+    )
+    if m:
+        return m.group(1).strip().rstrip(".")
+
+    # Fallback: last standalone number/expression line
+    for line in reversed(text.strip().splitlines()):
+        line = line.strip()
+        if re.fullmatch(r'[-+]?\d[\d,./]*', line):
+            return line
+    return None
 
 
 def _build_result(messages, answer, complete, subtasks):
@@ -194,6 +263,7 @@ def run_planner(
         HumanMessage(content=question),
     ]
     answer, complete, subtasks = None, False, []
+    empty_streak = 0
 
     for step in range(MAX_STEPS):
         try:
@@ -205,6 +275,7 @@ def run_planner(
         messages.append(ai_msg)
 
         if ai_msg.tool_calls:
+            empty_streak = 0
             answer, complete = _handle_tool_calls(
                 ai_msg, execute_subtask_fn, subtasks, messages)
             if complete:
@@ -213,11 +284,21 @@ def run_planner(
 
         text = (ai_msg.content or "").strip()
         if not text:
-            logger.warning("[Planner] Empty response at step %d", step)
+            empty_streak += 1
+            logger.warning("[Planner] Empty response at step %d (streak=%d)", step, empty_streak)
+            if empty_streak >= _MAX_EMPTY_BEFORE_FREEFORM:
+                # No-tools fallback: let the model answer freely
+                answer, complete = _freeform_fallback_sync(
+                    model, api_base, api_key, temperature, messages)
+                if complete:
+                    break
+                # freeform also failed, give up
+                break
             messages.append(_NUDGE)
             continue
 
-        # Fallback: vLLM sometimes returns <tool_call> as plain text
+        empty_streak = 0
+        # Fallback: model wrote tool call as plain text
         parsed = _parse_text_tool_call(text)
         if parsed:
             logger.info("[Planner] Parsed tool call from plain text at step %d", step)
@@ -237,9 +318,69 @@ def run_planner(
                 break
             continue
 
-        logger.info("[Planner] Plain text at step %d", step)
+        # Plain text with reasoning but no finish — try to extract answer
+        extracted = _extract_answer_from_text(text)
+        if extracted:
+            logger.info("[Planner] Extracted answer from plain text at step %d", step)
+            answer = extracted
+            complete = True
+            break
+
+        logger.info("[Planner] Plain text at step %d (no answer found)", step)
 
     return _build_result(messages, answer, complete, subtasks)
+
+
+def _freeform_fallback_sync(model, api_base, api_key, temperature, messages):
+    """Retry without tools — let the model answer in free-form text."""
+    logger.info("[Planner] Freeform fallback: retrying without tools")
+    llm_no_tools = _make_llm(model, api_base, api_key, temperature, with_tools=False)
+    # Build a clean 2-message prompt: system + question (skip the failed tool attempts)
+    clean_msgs = [m for m in messages[:2]]  # system + user
+    clean_msgs.append(_FREEFORM_PROMPT)
+    try:
+        ai_msg = llm_no_tools.invoke(clean_msgs)
+        text = (ai_msg.content or "").strip()
+        messages.append(ai_msg)
+        if text:
+            # Try text tool-call parse first, then raw extraction
+            parsed = _parse_text_tool_call(text)
+            if parsed and parsed[0]["name"] == "finish":
+                answer = parsed[0]["args"].get("answer", "")
+                logger.info("[Planner] Freeform fallback: parsed finish(%s)", answer)
+                return answer, True
+            extracted = _extract_answer_from_text(text)
+            if extracted:
+                logger.info("[Planner] Freeform fallback: extracted '%s'", extracted)
+                return extracted, True
+    except Exception as e:
+        logger.warning("[Planner] Freeform fallback error: %s", e)
+    return None, False
+
+
+async def _freeform_fallback_async(model, api_base, api_key, temperature, messages):
+    """Async version of freeform fallback."""
+    logger.info("[Planner] Freeform fallback: retrying without tools")
+    llm_no_tools = _make_llm(model, api_base, api_key, temperature, with_tools=False)
+    clean_msgs = [m for m in messages[:2]]
+    clean_msgs.append(_FREEFORM_PROMPT)
+    try:
+        ai_msg = await llm_no_tools.ainvoke(clean_msgs)
+        text = (ai_msg.content or "").strip()
+        messages.append(ai_msg)
+        if text:
+            parsed = _parse_text_tool_call(text)
+            if parsed and parsed[0]["name"] == "finish":
+                answer = parsed[0]["args"].get("answer", "")
+                logger.info("[Planner] Freeform fallback: parsed finish(%s)", answer)
+                return answer, True
+            extracted = _extract_answer_from_text(text)
+            if extracted:
+                logger.info("[Planner] Freeform fallback: extracted '%s'", extracted)
+                return extracted, True
+    except Exception as e:
+        logger.warning("[Planner] Freeform fallback error: %s", e)
+    return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -253,14 +394,16 @@ async def arun_planner(
     api_key: str,
     execute_subtask_fn: Callable[[str, str], Awaitable[str]],
     temperature: float = 0.7,
+    system_prompt: str | None = None,
 ) -> dict:
     """Async version — execute_subtask_fn must be an async callable."""
     llm = _make_llm(model, api_base, api_key, temperature)
     messages: list = [
-        SystemMessage(content=build_system_prompt("planner")),
+        SystemMessage(content=system_prompt or build_system_prompt("planner")),
         HumanMessage(content=question),
     ]
     answer, complete, subtasks = None, False, []
+    empty_streak = 0
 
     for step in range(MAX_STEPS):
         try:
@@ -272,6 +415,7 @@ async def arun_planner(
         messages.append(ai_msg)
 
         if ai_msg.tool_calls:
+            empty_streak = 0
             for tc in ai_msg.tool_calls:
                 name = tc["name"]
                 args = tc["args"]
@@ -302,11 +446,19 @@ async def arun_planner(
 
         text = (ai_msg.content or "").strip()
         if not text:
-            logger.warning("[Planner] Empty response at step %d", step)
+            empty_streak += 1
+            logger.warning("[Planner] Empty response at step %d (streak=%d)", step, empty_streak)
+            if empty_streak >= _MAX_EMPTY_BEFORE_FREEFORM:
+                answer, complete = await _freeform_fallback_async(
+                    model, api_base, api_key, temperature, messages)
+                if complete:
+                    break
+                break
             messages.append(_NUDGE)
             continue
 
-        # Fallback: vLLM sometimes returns <tool_call> as plain text
+        empty_streak = 0
+        # Fallback: model wrote tool call as plain text
         parsed = _parse_text_tool_call(text)
         if parsed:
             logger.info("[Planner] Parsed tool call from plain text at step %d", step)
@@ -326,6 +478,14 @@ async def arun_planner(
                 break
             continue
 
-        logger.info("[Planner] Plain text at step %d", step)
+        # Plain text with reasoning but no finish — try to extract answer
+        extracted = _extract_answer_from_text(text)
+        if extracted:
+            logger.info("[Planner] Extracted answer from plain text at step %d", step)
+            answer = extracted
+            complete = True
+            break
+
+        logger.info("[Planner] Plain text at step %d (no answer found)", step)
 
     return _build_result(messages, answer, complete, subtasks)

@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 import argparse
 import threading
@@ -105,12 +106,18 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
                       and hasattr(bench, 'interactive_verify')
                       and args.interactive)
 
-    if is_interactive:
+    # Pipeline mode: planner → router → sub-agent → Docker (our method)
+    is_pipeline = (hasattr(bench, 'pipeline_verify') and getattr(args, 'pipeline', False))
+
+    if is_pipeline:
+        _run_pipeline_eval(bench, tasks, need_verify,
+                           predictions, verification, pred_file, verify_file,
+                           logs_dir, args)
+    elif is_interactive:
         _run_interactive(router, bench, tasks, need_verify,
                          predictions, verification, pred_file, verify_file,
                          logs_dir, args)
     elif bench.name == "SWE-bench_Verified" and not args.interactive:
-        # SWE-bench one-shot fallback (no env feedback, weak baseline)
         _run_sequential(router, bench, tasks, need_gen, need_verify,
                         predictions, verification, pred_file, verify_file,
                         logs_dir, args)
@@ -130,10 +137,19 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
         for m in p.get("routed_models", []):
             model_usage[m] = model_usage.get(m, 0) + 1
 
+    # Compute pass@k from stored per-attempt rewards
+    pass_at = {}
+    for k in [1, 3]:
+        count = 0
+        for v in verification.values():
+            attempts = v.get("pass_at_k", [v.get("reward", 0)])
+            count += int(any(r > 0 for r in attempts[:k]))
+        pass_at[k] = round(count / max(verified, 1), 4)
+
     summary = {
         "router": router.name, "benchmark": bench.name,
         "total": total, "verified": verified, "passed": passed,
-        "pass_rate": round(passed / max(verified, 1), 4),
+        "pass_at_1": pass_at.get(1, 0), "pass_at_3": pass_at.get(3, 0),
         "passed_ids": [tid for tid, v in verification.items() if v.get("reward", 0) > 0],
         "total_cost_usd": round(total_cost, 4),
         "avg_cost": round(total_cost / max(total, 1), 6),
@@ -145,9 +161,8 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
 
     print(f"\n{'='*60}")
     print(f"RESULTS — {router.name} on {bench.name}")
-    print(f"  Pass rate: {passed}/{verified} ({passed/max(verified,1)*100:.1f}%)")
+    print(f"  Pass@1: {pass_at.get(1,0)*100:.1f}%  Pass@3: {pass_at.get(3,0)*100:.1f}%  ({passed}/{verified})")
     print(f"  Cost: ${total_cost:.4f} (${total_cost/max(total,1):.6f}/task)")
-    print(f"  Routing: avg {summary['avg_routes']} routes, models={model_usage}")
     print(f"  Output: {out}")
     print(f"{'='*60}")
     return summary
@@ -156,26 +171,79 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
 def _run_interactive(router, bench, tasks, need_verify,
                      predictions, verification, pred_file, verify_file,
                      logs_dir, args):
-    """Interactive mode: router ↔ Docker multi-turn for each task."""
+    """Interactive mode: router ↔ Docker multi-turn for each task.
+    Supports pass@k: run up to k attempts, pass if any succeeds."""
+    pass_k = getattr(args, 'pass_k', 1)
     to_run = [t for t in tasks if t.task_id not in verification]
     if not to_run:
         print("Interactive: all tasks already verified")
         return
 
-    print(f"Interactive mode: {len(to_run)} tasks (workers={args.verify_workers})")
+    print(f"Interactive mode: {len(to_run)} tasks, pass@{pass_k} (workers={args.verify_workers})")
+
+    def _run_one_task(task):
+        """Run up to pass_k attempts for a single task."""
+        rewards = []
+        for attempt in range(pass_k):
+            attempt_logs = os.path.join(logs_dir, f"attempt_{attempt}") if pass_k > 1 else logs_dir
+            vr = bench.interactive_verify(task, router, attempt_logs)
+            rewards.append(vr.reward)
+            if vr.reward > 0:
+                break  # early stop on first success
+        best_reward = max(rewards)
+        return task, best_reward, rewards, vr
 
     lock = threading.Lock()
     with open(verify_file, "a") as vout, open(pred_file, "a") as pout:
         with ThreadPoolExecutor(max_workers=args.verify_workers) as ex:
-            futs = {ex.submit(bench.interactive_verify, t, router, logs_dir): t
-                    for t in to_run}
+            futs = {ex.submit(_run_one_task, t): t for t in to_run}
             for fut in tqdm(as_completed(futs), total=len(to_run), desc="Interactive"):
+                task, best_reward, rewards, last_vr = fut.result()
+                d = {"task_id": task.task_id, "reward": best_reward,
+                     "pass_at_k": rewards,
+                     "error": last_vr.error, "log": last_vr.log[:500]}
+                pred_entry = {"task_id": task.task_id, "answer": "(interactive)",
+                              "route_count": 0, "routed_models": [], "cost": 0}
+                with lock:
+                    verification[task.task_id] = d
+                    vout.write(json.dumps(d) + "\n")
+                    vout.flush()
+                    if task.task_id not in predictions:
+                        predictions[task.task_id] = pred_entry
+                        pout.write(json.dumps(pred_entry) + "\n")
+                        pout.flush()
+                status = "PASS" if vr.reward > 0 else "FAIL"
+                err = f" ({vr.error})" if vr.error else ""
+                tqdm.write(f"  {vr.task_id}: {status}{err}")
+
+
+def _run_pipeline_eval(bench, tasks, need_verify,
+                       predictions, verification, pred_file, verify_file,
+                       logs_dir, args):
+    """Pipeline mode: planner → router → sub-agent → Docker verify."""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from configs import load_pools
+
+    pools = load_pools()
+    to_run = [t for t in tasks if t.task_id not in verification]
+    if not to_run:
+        print("Pipeline: all tasks already verified")
+        return
+
+    print(f"Pipeline mode: {len(to_run)} tasks (workers={args.verify_workers})")
+
+    lock = threading.Lock()
+    with open(verify_file, "a") as vout, open(pred_file, "a") as pout:
+        with ThreadPoolExecutor(max_workers=args.verify_workers) as ex:
+            futs = {ex.submit(bench.pipeline_verify, t, args, pools, logs_dir): t
+                    for t in to_run}
+            for fut in tqdm(as_completed(futs), total=len(to_run), desc="Pipeline"):
                 task = futs[fut]
                 vr = fut.result()
                 d = {"task_id": vr.task_id, "reward": vr.reward,
                      "error": vr.error, "log": vr.log[:500]}
-                # Also save a prediction entry for consistency
-                pred_entry = {"task_id": vr.task_id, "answer": "(interactive)",
+                pred_entry = {"task_id": vr.task_id, "answer": "(pipeline)",
                               "route_count": 0, "routed_models": [], "cost": 0}
                 with lock:
                     verification[vr.task_id] = d
@@ -343,7 +411,10 @@ def main():
     parser.add_argument("--skip_gen", action="store_true")
     parser.add_argument("--skip_verify", action="store_true")
     parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--pipeline", action="store_true", help="Pipeline mode: planner→router→sub-agent→Docker")
+    parser.add_argument("--pass-k", type=int, default=1, help="pass@k: run up to k attempts per task")
     args = parser.parse_args()
+    args.pass_k = args.pass_k  # ensure accessible
 
     if not args.output_dir:
         args.output_dir = f"/data/xieht/eval_results/{args.router}_{args.bench}"

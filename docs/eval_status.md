@@ -42,19 +42,19 @@
 | **RouterSFT(Qwen3-4B-Instruct) claude** |
 
 
-### Cost Table 
+### Cost Table (official pricing, no Qwen in sub-agent pool)
 
-| Model | $/1M output tokens | Tier |
-|-------|---:|------|
-| claude-haiku-4-5-20251001 | $1.25 | nano |
-| gemini-2.5-flash | $1.50 | nano |
-| kimi-k2.5 | $2.00 | large |
-| qwen3.6-plus | $8.00 | large |
-| gemini-3.1-pro-preview | $10.00 | large |
-| claude-sonnet-4-6 | $15.00 | mid |
-| gpt-5.3-codex | $20.00 | code |
-| gpt-5.4 | $60.00 | large |
-| claude-opus-4-6 | $75.00 | large |
+| Model | $/1M input | $/1M output |
+|-------|---:|---:|
+| gemini-2.5-flash-lite | $0.10 | $0.40 |
+| gemini-2.5-flash | $0.30 | $2.50 |
+| kimi-k2.5 | $0.35 | $2.50 |
+| gemini-3-flash-preview | $0.50 | $3.00 |
+| claude-haiku-4-5-20251001 | $1.00 | $5.00 |
+| gpt-5.3-codex | $1.75 | $14.00 |
+| gpt-5.4 | $2.50 | $15.00 |
+| claude-sonnet-4-6 | $3.00 | $15.00 |
+| claude-opus-4-6 | $5.00 | $25.00 |
 
 ---
 

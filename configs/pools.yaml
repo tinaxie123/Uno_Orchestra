@@ -3,90 +3,83 @@ policy_models:
   - Qwen/Qwen2.5-7B-Instruct
 models:
   - id: gemini-2.5-flash-lite
-    usd_per_1m_output: 0.30
+    usd_per_1m_input: 0.10
+    usd_per_1m_output: 0.40
     description: >
-      Google's ultra-affordable model optimized for low latency and cost efficiency.
-      1M token context window with full multimodal support (text, image, audio, video).
-      Thinking is disabled by default to prioritize speed. Best for high-volume,
-      cost-sensitive tasks like classification, extraction, and simple Q&A.
-      Limited reasoning and coding capability.
+      Google's ultra-affordable model. 1M context, multimodal.
+      Best for high-volume simple tasks. Limited reasoning/coding.
     allowed_skills: [direct_answer, web_search, read_document, extract_field]
 
   - id: gemini-2.5-flash
+    usd_per_1m_input: 0.15
     usd_per_1m_output: 0.60
     description: >
-      Google's fastest and most budget-friendly model in the 2.5 family. Delivers ~201 tokens/sec
-      with a 1M token context window. Supports text, image, audio, and video inputs.
-      Strong at summarization, chatbots, and production pipelines. Results close to Pro quality
-      at a fraction of the cost. Improved agentic tool use with 5% gain on SWE-Bench.
-      Not suited for complex symbolic math or deep multi-step reasoning.
+      Google's fast budget model. 1M context, ~201 tok/s. Good for summarization,
+      chatbots, production pipelines. Not for complex math or deep reasoning.
     allowed_skills: [direct_answer, web_search, read_document, extract_field]
 
   - id: kimi-k2.5
+    usd_per_1m_input: 0.35
     usd_per_1m_output: 2.50
     description: >
-      Moonshot AI's open-source MoE model (1T total params, 32B active per request).
-      Trained on 15T tokens mixing visual and textual data from the start.
-      Supports four modes: Instant, Thinking, Agent, and Agent Swarm (up to 100 parallel sub-agents).
-      Strong at coding (outperforms Gemini 3 Pro on SWE-Bench Multilingual), document processing,
-      and research. Excellent Chinese language support. Lacks dedicated symbolic math skill.
+      Moonshot AI's open-source MoE (1T params, 32B active). Strong coding,
+      document processing, Chinese support. Lacks symbolic math.
     allowed_skills: [direct_answer, reason, web_search, read_document, extract_field, fact_check]
 
-  - id: qwen3.6-plus
+  - id: gemini-3-flash-preview
+    usd_per_1m_input: 0.50
     usd_per_1m_output: 3.00
     description: >
-      Alibaba's flagship model (April 2026). Hybrid architecture combining linear attention
-      with sparse MoE routing. 1M token context window. Matches Claude Opus 4.5 on
-      SWE-bench and Terminal-Bench 2.0. Reasoning is active by default on every prompt.
-      Strong all-rounder for agentic coding, symbolic math, multi-step reasoning, and
-      multimodal code generation. Best cost-performance ratio for most tasks.
-    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
-
-  - id: gemini-3-flash-preview
-    usd_per_1m_output: 4.00
-    description: >
-      Google's high-speed thinking model combining Gemini 3 Pro's reasoning with Flash-line
-      latency and efficiency. 1M token context window. Configurable reasoning via thinking
-      levels (minimal/low/medium/high) to balance quality, latency, and cost.
-      Near-Pro-level reasoning and tool use with substantially lower latency.
-      Broad improvements over 2.5 Flash in reasoning, multimodal understanding, and reliability.
+      Google's high-speed thinking model. 1M context. Near-Pro reasoning with
+      Flash-line latency. Configurable thinking levels. Best mid-tier all-rounder.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
 
+  - id: claude-haiku-4-5-20251001
+    usd_per_1m_input: 1.00
+    usd_per_1m_output: 4.00
+    description: >
+      Anthropic's fastest model. 200K context. Strong at classification,
+      extraction, simple Q&A. Best for high-volume cost-sensitive tasks.
+    allowed_skills: [direct_answer, web_search, read_document, extract_field, fact_check]
+
+  - id: gemini-3.1-pro-preview
+    usd_per_1m_input: 2.50
+    usd_per_1m_output: 12.00
+    description: >
+      Google's flagship reasoning model. 2M context, native multimodal.
+      Strong math, coding, and agentic tasks. Good cost-performance ratio.
+    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
+
   - id: gpt-5.3-codex
+    usd_per_1m_input: 1.75
     usd_per_1m_output: 14.00
     description: >
-      OpenAI's advanced agentic coding model (Feb 2026). 25% faster than GPT-5.2-Codex.
-      Tops SWE-Bench Pro and Terminal-Bench 2.0. Built for the full software lifecycle:
-      debugging, deploying, monitoring, writing PRDs, tests, and metrics.
-      Excels at precise symbolic computation, code generation, and structured output.
-      Provides real-time interactive updates during execution.
+      OpenAI's advanced agentic coding model. Tops SWE-Bench Pro and Terminal-Bench 2.0.
+      Full software lifecycle: debugging, deploying, testing. Precise symbolic computation.
     allowed_skills: [direct_answer, symbolic_math, execute_python, execute_shell, call_api, read_code, parse_structured]
 
   - id: gpt-5.4
+    usd_per_1m_input: 2.50
     usd_per_1m_output: 15.00
     description: >
-      OpenAI's most capable frontier model (March 2026). 1M token context window.
-      Native computer-use capabilities. Scores 57.7% on SWE-bench Pro, 75% on OSWorld,
-      83% on GDPval. Most token-efficient reasoning model from OpenAI. Unified architecture
-      for coding, reasoning, and computer use. Use for hard problems where cheaper models fail.
+      OpenAI's most capable model. 1M context. Native computer-use.
+      57.7% SWE-bench Pro, 75% OSWorld. Unified coding/reasoning/computer-use.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
   - id: claude-sonnet-4-6
+    usd_per_1m_input: 3.00
     usd_per_1m_output: 15.00
     description: >
-      Anthropic's fast frontier model. 79.6% on SWE-bench Verified (nearly matching Opus at 80.8%).
-      40-60 tokens/sec with 64K output limit. 72%+ on autonomous computer use.
-      Thinks between tool calls for more reliable agentic workflows. 40% cheaper than Opus.
-      Ideal for routine coding, classification, and multi-step agent tasks at frontier quality.
+      Anthropic's fast frontier model. 79.6% SWE-bench Verified. 1M context,
+      40-60 tok/s. Thinks between tool calls. Ideal for coding and multi-step agents.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
   - id: claude-opus-4-6
+    usd_per_1m_input: 15.00
     usd_per_1m_output: 75.00
     description: >
-      Anthropic's most capable model. 80.8% on SWE-bench Verified. 1M token context window
-      with 128K output limit. 20-30 tokens/sec. Thinks between tool calls for reliable
-      multi-step reasoning. Best-in-class for the hardest agentic tasks, complex code review,
-      and long-context analysis. Very expensive — reserve for tasks where all other models fail.
+      Anthropic's most capable model. 80.8% SWE-bench Verified. 1M context,
+      128K output. Thinks between tool calls. Reserve for hardest tasks only.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
 skills:
@@ -121,6 +114,8 @@ pool_ablations:
   no_frontier:
     exclude: [claude-opus-4-6, gpt-5.4, claude-sonnet-4-6]
   minimal:
-    include: [gemini-2.5-flash, qwen3.6-plus, gpt-5.4]
+    include: [gemini-2.5-flash, gemini-3-flash-preview, gpt-5.4]
   mid_only:
-    include: [qwen3.6-plus, gemini-3-flash-preview, gpt-5.3-codex]
+    include: [gemini-3-flash-preview, gpt-5.3-codex, claude-haiku-4-5-20251001]
+  pro_only:
+    include: [gemini-3.1-pro-preview, gpt-5.3-codex, gpt-5.4, claude-sonnet-4-6]

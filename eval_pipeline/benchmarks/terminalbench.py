@@ -68,6 +68,43 @@ RULES:
 - If a command times out, try a simpler alternative.
 """
 
+INTERACTIVE_SUBAGENT_PROMPT = """\
+You are an orchestrator completing a terminal/systems task inside a Docker container.
+You can either execute commands directly OR delegate to a specialized LLM for help.
+
+Each turn, respond with ONE of these formats:
+
+Option A — Execute a command yourself:
+DISCUSSION
+<reasoning>
+COMMAND
+<single shell command>
+
+Option B — Ask a specialized LLM for help:
+DISCUSSION
+<reasoning about which model to use and why>
+COMMAND
+<search> ModelName:Your question or request </search>
+
+Available models (input/output $/1M tokens):
+Gemini-2.5-Flash-Lite($0.10/$0.40) Gemini-2.5-Flash($0.30/$2.50) Kimi-K2.5($0.35/$2.50)
+Gemini-3-Flash-Preview($0.50/$3) Claude-Haiku-4.5($1/$5) GPT-5.3-Codex($1.75/$14)
+GPT-5.4($2.50/$15) Claude-Sonnet-4.6($3/$15) Claude-Opus-4.6($5/$25)
+
+The LLM response will appear as [API ...]: <response>. You can then use that to write commands.
+
+When done:
+DISCUSSION
+<summary>
+COMMAND
+finish
+
+RULES:
+- ONE action per turn (either a shell command or a <search> call).
+- Use cheap models for simple questions, expensive ones for complex code/reasoning.
+- You are root inside the container. Use DEBIAN_FRONTEND=noninteractive for apt.
+"""
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TerminalBench benchmark
@@ -385,3 +422,170 @@ class TerminalBench(BaseBenchmark):
             ]):
                 lines.append(s)
         return "\n".join(lines) if lines else text
+
+    # ─── Pipeline mode: planner → router → sub-agent → Docker ──
+
+    def pipeline_verify(self, task: Task, args, pools, logs_dir=None) -> VerifyResult:
+        """
+        Full pipeline evaluation (our method):
+        1. Planner (local) decomposes task into subtasks
+        2. Router (local) selects API model + skill per subtask
+        3. Sub-agent (API) generates solution/commands
+        4. Extract commands → execute in Docker
+        5. Run test.sh → reward
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self._async_pipeline_verify(task, args, pools, logs_dir)
+            )
+        finally:
+            loop.close()
+
+    async def _async_pipeline_verify(self, task, args, pools, logs_dir=None):
+        """
+        Multi-round pipeline: planner decomposes → router selects model →
+        sub-agent generates commands → Docker executes → output feeds back to planner.
+        Repeats until planner finishes or max_rounds.
+        """
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+        from scripts.data.router import aroute_subtask
+        from scripts.data.planner import arun_planner
+        from openai import AsyncOpenAI
+        from ..executors import DockerExecutor
+
+        config = task.raw.get("config", {})
+        task_dir = Path(task.raw.get("task_dir", ""))
+        if not config:
+            config, task_dir_str = self._get_task_config(task.task_id)
+            if not config:
+                return VerifyResult(task.task_id, 0.0, error=f"No config for {task.task_id}")
+            task_dir = Path(task_dir_str)
+
+        task_logs = Path(logs_dir or "/tmp") / task.task_id
+        verifier_logs = task_logs / "verifier"
+        agent_logs = task_logs / "agent"
+        verifier_logs.mkdir(parents=True, exist_ok=True)
+        agent_logs.mkdir(parents=True, exist_ok=True)
+
+        log = ""
+        models_used = []
+        skills_used = []
+
+        # Start Docker container first
+        executor = DockerExecutor(
+            task_id=task.task_id,
+            task_dir=task_dir,
+            task_config=config,
+            verifier_logs_dir=verifier_logs,
+            agent_logs_dir=agent_logs,
+            docker_manager=self._get_docker_manager(),
+            docker_timeout=self.docker_timeout,
+        )
+
+        sub_client = AsyncOpenAI(
+            base_url=args.api_base, api_key=args.api_key, timeout=60,
+        )
+        _extra = {"enable_thinking": False}
+
+        try:
+            await executor.start_container()
+            instruction = task.context.get("task_instruction", task.question)
+            env_feedback = ""  # accumulate Docker output for planner context
+            max_rounds = 10
+
+            # Define execute_subtask: router picks model → sub-agent responds → extract commands → Docker exec
+            async def execute_subtask(subtask_instruction: str, task_id: str) -> str:
+                nonlocal env_feedback
+                # Same as arun_agent: router selects model + skill
+                selected_model, selected_skill = await aroute_subtask(
+                    instruction=subtask_instruction,
+                    model=args.local_model or "Qwen/Qwen2.5-7B-Instruct",
+                    api_base=args.local_base, api_key="none",
+                    pools=pools, temperature=0.3,
+                )
+                models_used.append(selected_model)
+                skills_used.append(selected_skill)
+
+                # Same as arun_agent: sub-agent receives instruction directly
+                try:
+                    resp = await sub_client.chat.completions.create(
+                        model=selected_model,
+                        messages=[{"role": "user", "content": subtask_instruction}],
+                        temperature=0.1, max_tokens=1024,
+                        extra_body=_extra,
+                    )
+                    sub_response = resp.choices[0].message.content.strip()
+                except Exception as e:
+                    sub_response = f"Error: {e}"
+
+                # Extra step vs arun_agent: extract commands and execute in Docker
+                commands = self._extract_commands(sub_response)
+                if commands.strip():
+                    output, exit_code = await executor.execute_command(commands, timeout=300)
+                    output = output[-2000:]
+                    result = f"[routed to {selected_model} / {selected_skill}]\n{sub_response}\n[Docker exit={exit_code}]\n{output}"
+                else:
+                    result = f"[routed to {selected_model} / {selected_skill}]\n{sub_response}"
+
+                env_feedback += f"\n{result[-1000:]}"
+                return result
+
+            # Terminal-Bench specific planner prompt
+            tb_planner_prompt = (
+                "You are an orchestrator completing a terminal/systems task inside a Docker container.\n"
+                "Your sub-agents will execute shell commands in the container.\n\n"
+                "Tools:\n"
+                "- plan_subtask(instruction, task_id): delegate to a specialist who will run commands in Docker.\n"
+                "  The instruction MUST describe what shell commands to run, what packages to install,\n"
+                "  what files to create/edit, etc. Be specific and actionable.\n"
+                "- finish(answer): call when all work is done. The answer field can be 'done' or a brief summary.\n\n"
+                "Rules:\n"
+                "1. Break the task into concrete subtasks: install dependencies, write code, configure services, test.\n"
+                "2. Each subtask instruction must be self-contained with exact commands or code.\n"
+                "3. Include bash commands in the instruction, e.g. 'Run: apt-get install -y nginx && nginx -v'\n"
+                "4. After sub-agents complete, call finish('done').\n"
+                "5. You are root in the container. Use DEBIAN_FRONTEND=noninteractive for apt.\n"
+            )
+
+            # Run planner with Docker-integrated subtask execution
+            planner_result = await arun_planner(
+                question=instruction,
+                model=args.local_model or "Qwen/Qwen2.5-7B-Instruct",
+                api_base=args.local_base, api_key="none",
+                execute_subtask_fn=execute_subtask,
+                temperature=0.7,
+                system_prompt=tb_planner_prompt,
+            )
+
+            log += f"[PIPELINE] complete={planner_result.get('complete')} models={models_used} skills={skills_used}\n"
+            log += f"[ANSWER] {str(planner_result.get('answer',''))[:300]}\n"
+
+            # Save trajectory
+            with (task_logs / "pipeline_result.json").open("w") as f:
+                import json
+                json.dump({
+                    "task_id": task.task_id,
+                    "result": planner_result,
+                    "models_used": models_used,
+                    "skills_used": skills_used,
+                    "log": log,
+                }, f, indent=2, default=str)
+
+            # Run tests
+            reward = await executor.run_tests()
+            log += f"[REWARD] {reward}\n"
+
+            with (task_logs / "trace.log").open("w") as f:
+                f.write(log)
+
+            return VerifyResult(task.task_id, reward, log=log[-3000:])
+
+        except Exception as e:
+            return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[-3000:])
+        finally:
+            try:
+                await executor.cleanup()
+            except Exception:
+                pass

@@ -102,24 +102,19 @@ Train/val source overlap: **0**.
 **🔧Policy models (compared)**: Qwen3-4B, Qwen2.5-7B-Instruct
 **🧑‍🏫Teacher model**: Qwen3.5-Plus
 
-**👷Worker pool**: 10 models across 5 providers
-To avoid 
+**Worker pool**: 9 models across 4 providers, no Qwen in sub-agent pool (`configs/pools.yaml`)
 
-| Model | Input $/1M | Output $/1M |
-|-------|-----------|-------------|
+| Model | USD/1M input | USD/1M output |
+|-------|-------------|--------------|
 | gemini-2.5-flash-lite | $0.10 | $0.40 |
-| gemini-2.5-flash | $0.15 | $0.60 |
+| gemini-2.5-flash | $0.30 | $2.50 |
 | kimi-k2.5 | $0.35 | $2.50 |
 | gemini-3-flash-preview | $0.50 | $3.00 |
-| claude-haiku-4-5-20251001 | $1.00 | $4.00 |
-| gemini-3.1-pro-preview | $2.50 | $12.00 |
+| claude-haiku-4-5-20251001 | $1.00 | $5.00 |
 | gpt-5.3-codex | $1.75 | $14.00 |
 | gpt-5.4 | $2.50 | $15.00 |
 | claude-sonnet-4-6 | $3.00 | $15.00 |
-| claude-opus-4-6 | $15.00 | $75.00 |
-
-
-
+| claude-opus-4-6 | $5.00 | $25.00 |
 
 **Skill pool**: 13 skills: direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, parse_structured, symbolic_math, execute_python, execute_shell, fact_check, call_api.
 

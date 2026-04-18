@@ -81,6 +81,7 @@ def load_pools(path: str | None = None) -> PoolConfig:
         "skills": skills,
         "model_skills": {model["id"]: model.get("allowed_skills", skills) for model in cfg["models"]},
         "cost_per_m": {model["id"]: model["usd_per_1m_output"] for model in cfg["models"]},
+        "input_cost_per_m": {model["id"]: model.get("usd_per_1m_input", 0) for model in cfg["models"]},
         "fallbacks": dict(cfg.get("fallbacks", {})),
         "pool_ablations": dict(cfg.get("pool_ablations", {})),
         "policy_models": list(cfg.get("policy_models", [])),

@@ -40,7 +40,7 @@ surface-level errors on individual inputs.
 
 ### Worker Pool
 
-9 models across 5 families, 13 skills. Cost ranges from $1.25/M tokens (haiku) to $75/M tokens (opus). The router learns to balance accuracy vs cost -- picking cheap models for easy subtasks and expensive models only when needed. Full definition in `configs/pools.yaml`.
+9 models across 4 providers (no Qwen in sub-agent pool), 13 skills. Output cost ranges from $0.40/M (gemini-2.5-flash-lite) to $25/M (claude-opus-4.6). The router learns to balance accuracy vs cost -- picking cheap models for easy subtasks and expensive models only when needed. Full definition in `configs/pools.yaml`.
 
 ### Training Pipeline
 

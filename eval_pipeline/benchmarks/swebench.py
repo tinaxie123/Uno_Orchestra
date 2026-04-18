@@ -1,9 +1,11 @@
 """
 SWE-bench Verified benchmark adapter.
 
-Two modes (mirrors AOrchestra design):
-1. One-shot: router generates patch blindly → swebench harness verifies (baseline, weak)
-2. Interactive: router ↔ Docker multi-turn — real shell feedback each step (correct approach)
+Two modes:
+1. Interactive: router ↔ Docker multi-turn → extract patch → official swebench harness verify
+2. One-shot: router generates patch blindly → official swebench harness verify (fallback)
+
+Verification always uses the official swebench harness (never self-parsed).
 """
 import re
 import os
@@ -11,107 +13,8 @@ import json
 import subprocess
 import tempfile
 import time
-from typing import List, Tuple, Dict, Optional
+from typing import List
 from .base import BaseBenchmark, Task, VerifyResult
-
-# ── Test evaluation helpers (from AOrchestra/swebench_executor.py) ──
-
-START_TEST_OUTPUT = ">>>>> Start Test Output"
-END_TEST_OUTPUT = ">>>>> End Test Output"
-
-REPO_TEST_CMDS = {
-    "astropy/astropy": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-    "django/django": "./tests/runtests.py --verbosity 2 {tests}",
-    "matplotlib/matplotlib": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-    "pallets/flask": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-    "psf/requests": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-    "pylint-dev/pylint": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-    "pytest-dev/pytest": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-    "scikit-learn/scikit-learn": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-    "sphinx-doc/sphinx": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-    "sympy/sympy": "bin/test -C --verbose {tests}",
-    "pydata/xarray": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
-}
-DEFAULT_TEST_CMD = "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider"
-
-
-def _make_eval_script(repo, base_commit, test_patch, repo_dir="/testbed", env_name="testbed"):
-    """Generate test evaluation script (from AOrchestra)."""
-    HEREDOC = "EOF_114329324912"
-    test_files = re.findall(r"diff --git a/.* b/(.*)", test_patch) if test_patch else []
-    directives = [f for f in test_files if not any(f.endswith(e) for e in
-                  [".json",".png",".jpg",".txt",".md",".rst",".yaml",".yml",".toml",".cfg",".lock"])]
-    if repo == "django/django":
-        directives = [d[len("tests/"):].replace("/",".").rstrip(".py") if d.startswith("tests/") else d for d in directives]
-    test_cmd = REPO_TEST_CMDS.get(repo, DEFAULT_TEST_CMD).format(tests=" ".join(directives))
-    reset = f"git checkout {base_commit} -- {' '.join(test_files)}" if test_files else ":"
-    apply_patch = f"git apply -v - <<'{HEREDOC}'\n{test_patch}\n{HEREDOC}" if test_patch else ":"
-    return "\n".join([
-        "#!/bin/bash", "set -uxo pipefail", "",
-        "source /opt/miniconda3/bin/activate", f"conda activate {env_name}",
-        f"cd {repo_dir}", f"git config --global --add safe.directory {repo_dir}",
-        "git status", f"git -c core.fileMode=false diff {base_commit}", "",
-        "source /opt/miniconda3/bin/activate", f"conda activate {env_name}",
-        reset, "", apply_patch, "",
-        f": '{START_TEST_OUTPUT}'", test_cmd, f": '{END_TEST_OUTPUT}'", "",
-        reset,
-    ]) + "\n"
-
-
-def _parse_test_results(test_output, repo, fail_to_pass, pass_to_pass):
-    """Parse test output → reward (from AOrchestra)."""
-    start = test_output.find(START_TEST_OUTPUT)
-    end = test_output.find(END_TEST_OUTPUT)
-    log = test_output[start:end] if start != -1 and end != -1 else test_output
-
-    # Parse pytest/django output
-    status = {}
-    if repo == "django/django":
-        for m in re.finditer(r"^(test_\w+)\s+\(([^)]+)\)\s+\.\.\.\s+(ok|FAIL|ERROR)", log, re.M):
-            status[f"{m.group(1)} ({m.group(2)})"] = "PASSED" if m.group(3) == "ok" else "FAILED"
-    else:
-        for m in re.finditer(r"^(.*?)\s+(PASSED|FAILED|ERROR)", log, re.M):
-            status[m.group(1).strip()] = m.group(2)
-
-    def _check(test_name, want_pass=True):
-        for k, s in status.items():
-            if test_name in k or k in test_name:
-                return (s == "PASSED") == want_pass
-            method = test_name.split("::")[-1] if "::" in test_name else test_name.split(".")[-1]
-            if method in k:
-                return (s == "PASSED") == want_pass
-        return want_pass  # optimistic default
-
-    f2p_ok = all(_check(t, True) for t in (fail_to_pass or []))
-    p2p_ok = all(_check(t, True) for t in (pass_to_pass or []))
-    return 1.0 if (f2p_ok and p2p_ok) else 0.0
-
-
-# ── Docker helpers ──
-
-def _docker_exec(container, cmd, timeout=120):
-    """Execute command in Docker container, return (stdout, exit_code)."""
-    try:
-        p = subprocess.run(
-            ["docker", "exec", "-i", container, "bash"],
-            input=cmd.encode(), capture_output=True, timeout=timeout,
-        )
-        out = p.stdout.decode("utf-8", errors="replace")
-        if p.stderr:
-            out += "\nSTDERR: " + p.stderr.decode("utf-8", errors="replace")[-500:]
-        return out[-3000:], p.returncode
-    except subprocess.TimeoutExpired:
-        return "[timeout]", -1
-    except Exception as e:
-        return f"[error: {e}]", -1
-
-
-def _get_swebench_image(instance_id):
-    """Map instance_id → Docker image name (swebench convention)."""
-    parts = instance_id.split("__")
-    owner = parts[0]
-    repo_issue = parts[1] if len(parts) > 1 else instance_id
-    return f"swebench/sweb.eval.x86_64.{owner}_1776_{repo_issue}"
 
 
 # ── SWE-bench system prompt for interactive mode ──
@@ -207,41 +110,49 @@ class SWEBench(BaseBenchmark):
 
     def interactive_verify(self, task: Task, router, logs_dir=None) -> VerifyResult:
         """
-        Multi-turn interactive evaluation (following AOrchestra):
-        1. Start swebench Docker container with repo at base_commit
+        Multi-turn interactive evaluation (AOrchestra style):
+        1. Start swebench Docker container via AOrchestra executor
         2. Router sees issue → DISCUSSION + COMMAND
-        3. COMMAND executes in Docker → real output back to router
+        3. COMMAND executes in container → real output back to router
         4. Repeat until 'submit' or max_steps
-        5. Run official test eval script inside container
+        5. Run tests in SAME container (AOrchestra executor.run_tests)
         """
-        from ..config import COST_PER_M, EVAL_MAX_TOKENS, SUB_AGENT_TEMP, resolve_model
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self._async_interactive_verify(task, router, logs_dir)
+            )
+        finally:
+            loop.close()
+
+    async def _async_interactive_verify(self, task, router, logs_dir=None):
+        from ..executors.swebench_executor import SWEBenchExecutor
+        from ..executors.swebench_data_loader import SWEBenchInstance
+        from pathlib import Path
 
         ctx = task.context
-        image = _get_swebench_image(task.task_id)
-        container = f"swebench_{task.task_id.replace('/', '_')}_{int(time.time())}"
-        task_logs = os.path.join(logs_dir or "/tmp", task.task_id.replace("/", "_"))
-        os.makedirs(task_logs, exist_ok=True)
+        task_logs = Path(logs_dir or "/tmp") / task.task_id.replace("/", "_")
+        task_logs.mkdir(parents=True, exist_ok=True)
         log = ""
-        total_cost = 0.0
 
-        # Regex to parse agent output
+        # Build SWEBenchInstance from task context
+        instance = SWEBenchInstance.from_dict(task.raw)
+
+        # Create AOrchestra executor
+        executor = SWEBenchExecutor(
+            instance=instance,
+            logs_dir=task_logs,
+            timeout=self.docker_timeout,
+        )
+
         CMD_RE = re.compile(r"COMMAND\s*\n(.+?)(?:\n\n|\Z)", re.DOTALL)
 
         try:
-            # ── Start container ──
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=10)
-            rc = subprocess.run([
-                "docker", "run", "-d", "--name", container,
-                image, "tail", "-f", "/dev/null",
-            ], capture_output=True, text=True, timeout=120)
-            if rc.returncode != 0:
-                return VerifyResult(task.task_id, 0.0, error=f"docker run: {rc.stderr[:300]}")
+            # Start container (AOrchestra handles image pull + checkout)
+            await executor.start_container()
 
-            # Checkout base commit
-            _docker_exec(container, f"cd /testbed && git checkout -f {ctx['base_commit']}", timeout=60)
-            _docker_exec(container, "cd /testbed && git reset --hard HEAD && git clean -fd", timeout=30)
-
-            # ── Build initial prompt ──
+            # Build prompt
             instruction = (
                 f"## Repository: {ctx['repo']}\n\n"
                 f"## Issue\n{ctx['problem_statement'][:6000]}\n"
@@ -254,9 +165,8 @@ class SWEBench(BaseBenchmark):
                 {"role": "user", "content": instruction},
             ]
 
-            # ── Multi-turn loop ──
+            # Multi-turn loop
             for step in range(self.max_steps):
-                # Get router decision
                 try:
                     resp = router.local.chat.completions.create(
                         model=router.model_name,
@@ -272,80 +182,40 @@ class SWEBench(BaseBenchmark):
                 messages.append({"role": "assistant", "content": assistant_text})
                 log += f"\n[STEP {step+1}] ASSISTANT:\n{assistant_text[:500]}\n"
 
-                # Parse COMMAND
                 cmd_match = CMD_RE.search(assistant_text)
                 if not cmd_match:
-                    # No command found, maybe router is done or confused
                     log += "[NO COMMAND FOUND]\n"
                     break
 
-                command = cmd_match.group(1).strip().split("\n")[0].strip()  # first line only
+                command = cmd_match.group(1).strip().split("\n")[0].strip()
 
-                # ── Submit: run tests ──
                 if command.lower() == "submit":
                     log += "[SUBMIT]\n"
                     break
 
-                # ── Execute command in Docker ──
-                # Wrap with cd /testbed for convenience
+                # Execute in same container via AOrchestra executor
                 exec_cmd = f"cd /testbed && {command}"
-                output, exit_code = _docker_exec(container, exec_cmd, timeout=120)
+                output, exit_code = await executor.execute_command(exec_cmd, timeout=120)
+                output = output[-2000:]
 
                 obs = f"[Step {step+1}/{self.max_steps}] exit_code={exit_code}\n{output}"
                 log += f"[STEP {step+1}] CMD: {command}\n[OUTPUT] {output[:500]}\n"
-
-                # Also check if router wants to call API sub-agent via <search>
-                search_m = re.search(r"<search>(.*?)(?:</search>|$)", assistant_text, re.DOTALL)
-                if search_m:
-                    raw = search_m.group(1).strip()
-                    parts = raw.split(":", 1)
-                    from ..routers.local_router import _resolve, DEFAULT_MODEL
-                    mid = _resolve(parts[0]) if len(parts) > 1 else DEFAULT_MODEL
-                    query = parts[1].strip() if len(parts) > 1 else raw
-                    try:
-                        sr = router.api.chat.completions.create(
-                            model=mid,
-                            messages=[{"role": "user", "content": f"SWE-bench issue in {ctx['repo']}:\n{ctx['problem_statement'][:3000]}\n\nQuestion: {query}"}],
-                            temperature=SUB_AGENT_TEMP, max_tokens=EVAL_MAX_TOKENS,
-                        )
-                        api_txt = sr.choices[0].message.content or ""
-                        toks = getattr(sr.usage, "completion_tokens", 0) or 0
-                        total_cost += COST_PER_M.get(mid, 10.0) * max(toks, 1) / 1e6
-                        obs += f"\n[API {mid}]: {api_txt[:1500]}"
-                    except Exception as e:
-                        obs += f"\n[API ERROR: {e}]"
-
                 messages.append({"role": "user", "content": obs})
 
-            # ── Run test evaluation ──
-            eval_script = _make_eval_script(
-                repo=ctx["repo"],
-                base_commit=ctx["base_commit"],
-                test_patch=ctx.get("test_patch", ""),
-            )
-            # Write and execute eval script
-            _docker_exec(container, f"cat > /eval.sh << 'EOF_EVAL'\n{eval_script}\nEOF_EVAL", timeout=10)
-            _docker_exec(container, "chmod +x /eval.sh", timeout=5)
-            test_output, _ = _docker_exec(container, "/bin/bash /eval.sh", timeout=self.docker_timeout)
-            log += f"\n[TEST OUTPUT]\n{test_output[-2000:]}\n"
+            # ── Run tests in SAME container (AOrchestra's run_tests) ──
+            reward, test_results = await executor.run_tests()
+            log += f"\n[TEST] reward={reward} summary={test_results.get('summary',{})}\n"
 
-            # Save logs
-            with open(os.path.join(task_logs, "trace.log"), "w") as f:
+            # Save trace
+            with (task_logs / "trace.log").open("w") as f:
                 f.write(log)
-            with open(os.path.join(task_logs, "test_output.txt"), "w") as f:
-                f.write(test_output)
 
-            # Parse reward
-            reward = _parse_test_results(
-                test_output, ctx["repo"],
-                ctx.get("FAIL_TO_PASS", []), ctx.get("PASS_TO_PASS", []),
-            )
             return VerifyResult(task.task_id, reward, log=log[-3000:])
 
         except Exception as e:
             return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[-3000:])
         finally:
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=30)
+            await executor.cleanup()
 
     # ─── One-shot mode (legacy, for non-interactive routers) ───
 

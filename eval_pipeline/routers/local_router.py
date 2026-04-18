@@ -13,38 +13,39 @@ Answer the given question. \
 Every time you receive new information, reason inside <think> ... </think>. \
 Then call a specialized LLM via <search> LLM-Name:Your-Query </search>. \
 
-STRICT FORMAT: Replace LLM-Name with EXACT name from [Claude-Haiku-4.5, Gemini-2.5-Flash, Kimi-K2.5, Claude-Sonnet-4.6, Gemini-3.1-Pro, GPT-5.3-Codex, Qwen3.6-Plus, Claude-Opus-4.6, GPT-5.4]. \
+STRICT FORMAT: Replace LLM-Name with EXACT name from [Gemini-2.5-Flash-Lite, Gemini-2.5-Flash, Kimi-K2.5, Gemini-3-Flash-Preview, Claude-Haiku-4.5, GPT-5.3-Codex, GPT-5.4, Claude-Sonnet-4.6, Claude-Opus-4.6]. \
 NEVER use literal "LLM-Name". Before each call, reason in <think> about which model and why. \
 Response appears in <information>...</information>. When done: <answer>...</answer>. \
 
-Models: \
-Claude-Haiku-4.5($1.25) Gemini-2.5-Flash($1.50) Kimi-K2.5($2) Claude-Sonnet-4.6($15) \
-Gemini-3.1-Pro($10) GPT-5.3-Codex($20) Qwen3.6-Plus($8) Claude-Opus-4.6($75) GPT-5.4($60) \
+Models (input/output $/1M tokens): \
+Gemini-2.5-Flash-Lite($0.10/$0.40) Gemini-2.5-Flash($0.30/$2.50) Kimi-K2.5($0.35/$2.50) \
+Gemini-3-Flash-Preview($0.50/$3) Claude-Haiku-4.5($1/$5) GPT-5.3-Codex($1.75/$14) \
+GPT-5.4($2.50/$15) Claude-Sonnet-4.6($3/$15) Claude-Opus-4.6($5/$25) \
 Question: {question}
 """
 
 # Display name → API model ID
 _NAME_MAP = {
-    "claude-haiku-4.5": "gemini-2.5-flash",
+    "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
     "gemini-2.5-flash": "gemini-2.5-flash",
     "kimi-k2.5": "kimi-k2.5",
-    "claude-sonnet-4.6": "claude-sonnet-4-6",
-    "gemini-3.1-pro": "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview": "gemini-3-flash-preview",
+    "claude-haiku-4.5": "claude-haiku-4-5-20251001",
     "gpt-5.3-codex": "gpt-5.3-codex",
-    "qwen3.6-plus": "qwen3.6-plus",
-    "claude-opus-4.6": "claude-opus-4-6",
     "gpt-5.4": "gpt-5.4",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "claude-opus-4.6": "claude-opus-4-6",
 }
 
 _FUZZY = [
     ("codex", "gpt-5.3-codex"), ("5.4", "gpt-5.4"), ("opus", "claude-opus-4-6"),
     ("sonnet", "claude-sonnet-4-6"), ("haiku", "claude-haiku-4-5-20251001"),
-    ("pro", "gemini-3.1-pro-preview"), ("flash", "gemini-2.5-flash"),
-    ("qwen", "qwen3.6-plus"), ("kimi", "kimi-k2.5"),
+    ("flash-lite", "gemini-2.5-flash-lite"), ("flash-preview", "gemini-3-flash-preview"),
+    ("flash", "gemini-2.5-flash"), ("kimi", "kimi-k2.5"),
     ("gpt", "gpt-5.4"), ("claude", "claude-sonnet-4-6"), ("gemini", "gemini-2.5-flash"),
 ]
 
-DEFAULT_MODEL = "gpt-5.3-codex"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 
 
 def _resolve(raw: str) -> str:
