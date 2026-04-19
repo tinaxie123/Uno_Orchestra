@@ -65,31 +65,8 @@ surface-level errors on individual inputs.
 
 
 
-## Method
-
-```
-                        SkillRouter (Qwen2.5-7B)
-                                |
-              +-----------------+-----------------+
-              |                                   |
-         Lazy mode                           Plan mode
-   <final_answer>answer</final_answer>    <plan round="1">
-                                            <subtask id="1" depends_on="">identify bug location</subtask>
-                                            <subtask id="2" depends_on="1">generate fix</subtask>
-                                          </plan>
-                                          <route model="gpt-5.3-codex" skill="read_code">...</route>
-                                          <route model="claude-opus-4-6" skill="execute_python">...</route>
-                                                |
-                                                v
-                                       9 worker models x 13 skills
-                                       (real API calls at inference)
-                                                |
-                                                v
-                                          <obs subtask="1">bug is in line 42...</obs>
-                                          <obs subtask="2">patched version: ...</obs>
-                                          <verify round="1" status="pass">both subtasks correct</verify>
-                                          <final_answer>...</final_answer>
-```
+## Model comparison
+We employ the same to Qwen3 4b instruct.
 
 ### Worker Pool
 
