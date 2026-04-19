@@ -74,10 +74,120 @@ Of 10k sampled tasks, 4,431 (44.3%) are already solved by the current router and
 | **Total**               | <br />         | **10,000** |     **4,431** | **1,365** | **2,963** |  
 
 
+Tool orchestration receives the largest share of SFT demonstrations (43.5%) because routing decisions in this axis involve both model selection *and* skill selection — the router must learn to match coding tasks to code-capable models and API-calling tasks to tool-aware models, requiring more diverse demonstrations than axes where only model selection matters. Atomic reasoning receives the smallest share (2.7%) because the router already solves 89.8% of these tasks; the few remaining SFT examples serve primarily as a negative signal, teaching the router to recognize tasks that should *not* be decomposed into subtasks.
+
+The high router-OK rate for atomic reasoning (89.8%) and knowledge retrieval (70.4%) confirms that a 7B parameter model can already handle single-hop factual and arithmetic tasks through direct answering. In contrast, the near-zero router-OK rate for tool orchestration (4.0%) validates our design choice to treat tool selection as a learned routing problem rather than a fixed heuristic — the current router cannot solve these tasks without training on delegation trajectories.
+
+## Teacher Success Rate & Error Taxonomy
+
+The teacher's overall success rate is 31.5%, varying sharply across axes:
+
+| Capability Axis         | Teacher Success Rate |
+| ----------------------- | -------------------: |
+| Atomic reasoning        |                72.5% |
+| Knowledge retrieval     |                42.2% |
+| Compositional reasoning |                43.9% |
+| Tool orchestration      |                29.5% |
+| Knowledge composition   |                14.9% |
+
+Knowledge composition (MuSiQue) has the lowest teacher success rate because it requires 3–4 hop reasoning chains where errors compound multiplicatively — each hop introduces a chance of retrieving the wrong entity, and the teacher has no mechanism to verify intermediate results.
+
+We classify the 2,963 RL-pool failures by root cause to understand what the teacher cannot yet solve:
+
+| Root Cause              | Count | Share | Description                                                        |
+| ----------------------- | ----: | ----: | ------------------------------------------------------------------ |
+| Wrong entity            | 1,059 | 35.7% | Retrieved or reasoned to an incorrect entity (QA tasks)            |
+| Output not code         | 1,021 | 34.5% | Returned natural language or numeric output instead of source code |
+| Format/reasoning error  |   221 |  7.5% | Mathematically inequivalent answer in different notation           |
+| Numeric reasoning error |   168 |  5.7% | Incorrect arithmetic in reading comprehension                      |
+| Incomplete code         |   131 |  4.4% | Generated skeleton code missing core logic                         |
+| Calculation error       |    92 |  3.1% | Pure arithmetic mistake                                            |
+| Wrong code logic        |    82 |  2.8% | Structurally complete code with incorrect algorithm                |
+| NL instead of API call  |    53 |  1.8% | Answered tool-use query in prose rather than issuing function call |
+| Other                   |   136 |  4.6% | Rounding errors, wrong API function, etc.                          |
+
+The two dominant failure modes — *wrong entity* (35.7%) and *output not code* (34.5%) — together account for 70% of RL-pool tasks. Both are fundamentally *delegation failures*: the teacher either routes to a model that hallucinates entities instead of retrieving them, or routes to a model that summarizes a coding task rather than solving it. These failures provide precisely the reward signal needed for RL: the router must learn that multi-hop QA tasks require search-capable models, and that competitive programming tasks require code-generation specialists.
+
+## Per-Source Breakdown
+
+### GSM8K — 14 failures (Teacher success 72.5%)
+
+| Root Cause           | Count | Share |
+| -------------------- | ----: | ----: |
+| `calculation_error`  |    11 | 78.6% |
+| `rounding_precision` |     3 | 21.4% |
+
+Pure arithmetic capability limitation. These tasks are single-step and correctly identified as not requiring decomposition.
+
+### NuminaMath — 303 failures (Teacher success 43.9%)
+
+| Root Cause                  | Count | Share |
+| --------------------------- | ----: | ----: |
+| `format_or_reasoning_error` |   221 | 72.9% |
+| `calculation_error`         |    62 | 20.5% |
+| `rounding_precision`        |    16 |  5.3% |
+
+The majority involve competition-level mathematics where the teacher produces a mathematically inequivalent answer (e.g., different interval notation, unsimplified fractions, or wrong choice letter). Only 20% are pure arithmetic failures.
+
+### DROP — 129 failures (Teacher success 59.8%)
+
+| Root Cause                | Count | Share |
+| ------------------------- | ----: | ----: |
+| `wrong_entity`            |    71 | 55.0% |
+| `numeric_reasoning_error` |    58 | 45.0% |
+
+Balanced between entity extraction errors and numeric reasoning over passages. Both require careful delegation to models with strong reading comprehension.
+
+### HotpotQA — 380 failures (Teacher success 32.0%)
+
+| Root Cause                | Count | Share |
+| ------------------------- | ----: | ----: |
+| `wrong_entity`            |   351 | 92.4% |
+| `numeric_reasoning_error` |    29 |  7.6% |
+
+Overwhelmingly wrong-entity errors. The 2-hop structure means the teacher must correctly resolve the first hop to even attempt the second, creating a compounding failure mode.
+
+### MuSiQue — 718 failures (Teacher success 14.9%)
+
+| Root Cause                | Count | Share |
+| ------------------------- | ----: | ----: |
+| `wrong_entity`            |   637 | 88.7% |
+| `numeric_reasoning_error` |    81 | 11.3% |
+
+The hardest QA dataset with 3–4 hops. The teacher's 14.9% success rate reflects the difficulty of maintaining coherent reasoning chains across multiple delegations.
+
+### TACO — 1,240 failures (Teacher success 15.4%)
+
+| Root Cause         | Count | Share |
+| ------------------ | ----: | ----: |
+| `output_not_code`  | 1,021 | 82.3% |
+| `incomplete_code`  |   131 | 10.6% |
+| `wrong_code_logic` |    82 |  6.6% |
+
+82% of failures produce non-code output — the teacher's planner summarizes the coding task in natural language rather than delegating to a code-generation model. Only 6.6% represent genuine algorithmic failures, suggesting that improving delegation strategy alone could recover a substantial fraction.
+
+### ToolACE — 179 failures (Teacher success 67.3%)
+
+| Root Cause               | Count | Share |
+| ------------------------ | ----: | ----: |
+| `nl_instead_of_api_call` |    53 | 29.6% |
+| `wrong_api_function`     |     7 |  3.9% |
+| Other                    |   119 | 66.5% |
+
+After injecting the available tool definitions into the prompt (following the ToolACE dataset's native format), the teacher's success rate improved from 0.4% to 67.3% — a 168× improvement. The remaining failures are primarily cases where the teacher generates a natural-language answer instead of the expected API call format.
 
 
 ## Model comparison
-We employ the same to Qwen3 4b instruct.
+
+We also evaluate a smaller router (Qwen3-4B) on the same pipeline. Its failure profile differs qualitatively:
+
+| Failure Mode                         | Qwen2.5-7B (round1) | Qwen3-4B (round1\_q3) |
+| ------------------------------------ | ------------------: | --------------------: |
+| Protocol failure (no finish / empty) |               24.3% |                 98.1% |
+| Wrong answer                         |               74.0% |                  1.9% |
+
+The 7B router's failures are dominated by *capability* limitations (wrong answers), while the 4B router fails almost exclusively at *protocol compliance* (unable to produce valid tool calls or finish actions). This suggests that protocol-following ability is a prerequisite that emerges between 4B and 7B scale, and that RL training for the 4B model should prioritize format compliance before routing quality.
+
 
 ### Worker Pool
 
