@@ -78,6 +78,11 @@ Tool orchestration receives the largest share of SFT demonstrations (43.5%) beca
 
 The high router-OK rate for atomic reasoning (89.8%) and knowledge retrieval (70.4%) confirms that a 7B parameter model can already handle single-hop factual and arithmetic tasks through direct answering. In contrast, the near-zero router-OK rate for tool orchestration (4.0%) validates our design choice to treat tool selection as a learned routing problem rather than a fixed heuristic — the current router cannot solve these tasks without training on delegation trajectories.
 
+## overview of sft dataset
+
+dalegation
+
+
 ## Error Taxonomy
 
 Base router 
