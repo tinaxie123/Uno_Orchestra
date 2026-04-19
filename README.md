@@ -44,11 +44,11 @@ We emply **bootstrapped curriculum filtering** on raw question sets from trainin
 
 ### 🍒Bootstrapped curriculum filtering
 
-*Stage 1: Router probe.* We run the current router checkpoint on every task in the pool with real sub-model execution — the router decomposes the task, delegates sub-tasks to actual models, and produces a final answer. We evaluate each task via pass\@3 and check against the gold label. Tasks the router already solves correctly are discarded, as they carry no learning signal.
+*Stage 1*:  **Router probe**. We run the current router checkpoint on every task in the pool with real sub-model execution — the router decomposes the task, delegates sub-tasks to actual models, and produces a final answer. We evaluate each task via pass\@3 and check against the gold label. Tasks the router already solves correctly are discarded, as they carry no learning signal.
 
-*Stage 2: Teacher trajectory collection and SFT/RL split.* For each remaining task — where the router failed — we run a strong teacher orchestrator with the same model pool. If the teacher produces a correct trajectory, the task enters the SFT set as a demonstration for imitation learning. If the teacher also fails, the task enters the RL set, where the router must discover a working decomposition through its own exploration.
+*Stage 2*: **Teacher trajectory**  For each remaining task — where the router failed — we run a strong teacher orchestrator with the same model pool. If the teacher produces a correct trajectory, the task enters the SFT set as a demonstration for imitation learning. If the teacher also fails, the task enters the RL set, where the router must discover a working decomposition through its own exploration.
 
-*Stage 3: Overlong filtering.* Following the overlong filtering strategy of DAPO (Yu et al., 2025), we discard any trajectory whose token count exceeds the training context length. Truncated trajectories teach the model to produce incomplete decompositions; removing them allows the model to generalize to longer reasoning chains at inference time without incurring penalties from truncation during training.
+*Stage 3*: **Noise removal**: trajectories with infrastructure artifacts (API timeouts, incomplete responses) or dataset annotation errors (gold answers that are not valid API calls) are discarded, as they provide neither correct demonstrations nor meaningful reward signal.
 
 This pipeline is self-adaptive: it can be re-applied after each training round to produce a curriculum of increasing difficulty, as the router's capability boundary shifts with training.
 
@@ -60,7 +60,20 @@ surface-level errors on individual inputs.
 
 📷This diagnostic-then-patch loop runs for 3 rounds. By the third round, the failure taxonomy reveals that all remaining errors stem from suboptimal routing decisions—such as dispatching a complex symbolic reasoning task to a lightweight model—rather than ambiguity in the Orchestrator's instructions. This indicates that prompt clarity has been saturated, and further gains   require improving the Router's model selection policy.
 
-## Error taxonomy
+☀️## Error taxonomy
+
+Of 10k sampled tasks, 4,431 (44.3%) are already solved by the current router and discarded. Of the 4,328 tasks that survive to the teacher stage, 1,365 (31.5%) yield successful SFT demonstrations and 2,963 (68.5%) enter the RL pool. The remaining 1,241 tasks are discarded as noise.
+
+**Table 1.** Data distribution by capability axis.
+
+| Capability Axis         | Benchmarks     |    Sampled |     Router OK |       SFT |        RL | SFT Share |
+| ----------------------- | -------------- | ---------: | ------------: | --------: | --------: | --------: |
+| Atomic reasoning        | GSM8K          |        500 |   449 (89.8%) |        37 |        14 |      2.7% |
+| Compositional reasoning | NuminaMath     |      1,500 | 1,098 (73.2%) |       237 |       303 |     17.4% |
+| Knowledge retrieval     | DROP, HotpotQA |      3,000 | 2,113 (70.4%) |       371 |       509 |     27.2% |
+| Knowledge composition   | MuSiQue        |      1,500 |   631 (42.1%) |       126 |       718 |      9.2% |
+| Tool orchestration      | TACO, ToolACE  |      3,500 |    140 (4.0%) |       594 |     1,419 |     43.5% |
+| **Total**               | <br />         | **10,000** |     **4,431** | **1,365** | **2,963** |    <br /> |
 
 
 
