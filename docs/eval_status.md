@@ -8,9 +8,6 @@
                                             **SWE-bench**                  **Terminal-Bench**
 | **Router-R1**|
 | **Wideseek-R1**|
-|**Single()** |
-|**Single()** |
-|**Single()** |
 | **RouterRL(Qwen2.5-7B-Instruct)Direct** |                  
 | **RouterRL(Qwen3-4B-Instruct)Direct** | 
 ｜ **RouterRL(Qwen2.5-7B-Instruct) Random**｜
