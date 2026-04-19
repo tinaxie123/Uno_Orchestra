@@ -60,20 +60,20 @@ surface-level errors on individual inputs.
 
 📷This diagnostic-then-patch loop runs for 3 rounds. By the third round, the failure taxonomy reveals that all remaining errors stem from suboptimal routing decisions—such as dispatching a complex symbolic reasoning task to a lightweight model—rather than ambiguity in the Orchestrator's instructions. This indicates that prompt clarity has been saturated, and further gains   require improving the Router's model selection policy.
 
-☀️## Error taxonomy
+## Error taxonomy
 
 Of 10k sampled tasks, 4,431 (44.3%) are already solved by the current router and discarded. Of the 4,328 tasks that survive to the teacher stage, 1,365 (31.5%) yield successful SFT demonstrations and 2,963 (68.5%) enter the RL pool. The remaining 1,241 tasks are discarded as noise.
 
-**Table 1.** Data distribution by capability axis.
+                               **Table 1.** Data distribution by capability axis.
 
-| Capability Axis         | Benchmarks     |    Sampled |     Router OK |       SFT |        RL | SFT Share |
-| ----------------------- | -------------- | ---------: | ------------: | --------: | --------: | --------: |
-| Atomic reasoning        | GSM8K          |        500 |   449 (89.8%) |        37 |        14 |      2.7% |
-| Compositional reasoning | NuminaMath     |      1,500 | 1,098 (73.2%) |       237 |       303 |     17.4% |
-| Knowledge retrieval     | DROP, HotpotQA |      3,000 | 2,113 (70.4%) |       371 |       509 |     27.2% |
-| Knowledge composition   | MuSiQue        |      1,500 |   631 (42.1%) |       126 |       718 |      9.2% |
-| Tool orchestration      | TACO, ToolACE  |      3,500 |    140 (4.0%) |       594 |     1,419 |     43.5% |
-| **Total**               | <br />         | **10,000** |     **4,431** | **1,365** | **2,963** |    <br /> |
+| Capability Axis         | Benchmarks     |    Sampled |     Router OK |       SFT |        RL | 
+| ----------------------- | -------------- | ---------: | ------------: | --------: | --------: | 
+| Atomic reasoning        | GSM8K          |        500 |   449 (89.8%) |        37 |        14 |    
+| Compositional reasoning | NuminaMath     |      1,500 | 1,098 (73.2%) |       237 |       303 |  
+| Knowledge retrieval     | DROP, HotpotQA |      3,000 | 2,113 (70.4%) |       371 |       509 |    
+| Knowledge composition   | MuSiQue        |      1,500 |   631 (42.1%) |       126 |       718 |    
+| Tool orchestration      | TACO, ToolACE  |      3,500 |    140 (4.0%) |       594 |     1,419 |    
+| **Total**               | <br />         | **10,000** |     **4,431** | **1,365** | **2,963** |  
 
 
 
