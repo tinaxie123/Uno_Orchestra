@@ -64,8 +64,6 @@ surface-level errors on individual inputs.
 
 Of 10k sampled tasks, 4,431 (44.3%) are already solved by the current router and discarded. Of the 4,328 tasks that survive to the teacher stage, 1,365 (31.5%) yield successful SFT demonstrations and 2,963 (68.5%) enter the RL pool. The remaining 1,241 tasks are discarded as noise.
 
-                               **Table 1.** Data distribution by capability axis.
-
 | Capability Axis         | Benchmarks     |    Sampled |     Router OK |       SFT |        RL | 
 | ----------------------- | -------------- | ---------: | ------------: | --------: | --------: | 
 | Atomic reasoning        | GSM8K          |        500 |   449 (89.8%) |        37 |        14 |    
