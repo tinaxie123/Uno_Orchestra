@@ -60,7 +60,7 @@ surface-level errors on individual inputs.
 
 📷This diagnostic-then-patch loop runs for 3 rounds. By the third round, the failure taxonomy reveals that all remaining errors stem from suboptimal routing decisions—such as dispatching a complex symbolic reasoning task to a lightweight model—rather than ambiguity in the Orchestrator's instructions. This indicates that prompt clarity has been saturated, and further gains   require improving the Router's model selection policy.
 
-## Error taxonomy
+## Dataset Description
 
 Of 10k sampled tasks, 4,431 (44.3%) are already solved by the current router and discarded. Of the 4,328 tasks that survive to the teacher stage, 1,365 (31.5%) yield successful SFT demonstrations and 2,963 (68.5%) enter the RL pool. The remaining 1,241 tasks are discarded as noise.
 
@@ -78,8 +78,13 @@ Tool orchestration receives the largest share of SFT demonstrations (43.5%) beca
 
 The high router-OK rate for atomic reasoning (89.8%) and knowledge retrieval (70.4%) confirms that a 7B parameter model can already handle single-hop factual and arithmetic tasks through direct answering. In contrast, the near-zero router-OK rate for tool orchestration (4.0%) validates our design choice to treat tool selection as a learned routing problem rather than a fixed heuristic — the current router cannot solve these tasks without training on delegation trajectories.
 
-## Teacher Success Rate & Error Taxonomy
+## Error Taxonomy
 
+Base router 
+
+
+
+Teacher
 The teacher's overall success rate is 31.5%, varying sharply across axes:
 
 | Capability Axis         | Teacher Success Rate |
@@ -108,7 +113,6 @@ We classify the 2,963 RL-pool failures by root cause to understand what the teac
 
 The two dominant failure modes — *wrong entity* (35.7%) and *output not code* (34.5%) — together account for 70% of RL-pool tasks. Both are fundamentally *delegation failures*: the teacher either routes to a model that hallucinates entities instead of retrieving them, or routes to a model that summarizes a coding task rather than solving it. These failures provide precisely the reward signal needed for RL: the router must learn that multi-hop QA tasks require search-capable models, and that competitive programming tasks require code-generation specialists.
 
-## Per-Source Breakdown
 
 ### GSM8K — 14 failures (Teacher success 72.5%)
 
