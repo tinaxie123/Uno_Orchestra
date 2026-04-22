@@ -17,22 +17,22 @@ dataloader_num_workers: 4
 packing: true
 
 ### output
-output_dir: outputs/router_qwen25_7b_merged_sft
-logging_steps: 5
-save_steps: 30
+output_dir: outputs/router_qwen25_7b_full_sft
+logging_steps: 10
+save_steps: 500
 plot_loss: true
 overwrite_output_dir: true
 save_only_model: false
 report_to: wandb
-run_name: router_qwen25_7b_merged_sft
+run_name: router_qwen25_7b_sft_3ep
 
-### train  (4 GPUs: effective batch = 1 * 8 * 4 = 32)
+### train
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
-learning_rate: 1.5e-5
+gradient_accumulation_steps: 32
+learning_rate: 2.0e-5
 num_train_epochs: 3.0
 lr_scheduler_type: cosine
-warmup_ratio: 0.05
+warmup_steps: 67
 max_grad_norm: 1.0
 weight_decay: 0.01
 bf16: true
@@ -43,4 +43,4 @@ save_total_limit: 3
 val_size: 0.02
 per_device_eval_batch_size: 1
 eval_strategy: steps
-eval_steps: 30
+eval_steps: 500
