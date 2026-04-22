@@ -37,3 +37,31 @@ class DirectRouter(BaseRouter):
                                total_cost=cost, total_tokens=toks)
         except Exception as e:
             return RouteResult(answer=f"Error: {e}", route_count=0)
+
+    def chat_completions(self, messages, tools=None, **kw):
+        """Pass-through to the underlying model, with optional tool definitions."""
+        call_kw = dict(
+            model=self.model_id,
+            messages=messages,
+            temperature=kw.get("temperature", 0.0),
+            max_tokens=kw.get("max_tokens", EVAL_MAX_TOKENS),
+        )
+        if tools:
+            call_kw["tools"] = tools
+            call_kw["tool_choice"] = kw.get("tool_choice", "auto")
+        r = self.api.chat.completions.create(**call_kw)
+        msg = r.choices[0].message
+        tool_calls = []
+        import json as _json
+        for tc in (msg.tool_calls or []):
+            try:
+                args = _json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except Exception:
+                args = {"_raw": tc.function.arguments}
+            tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": args})
+        return {
+            "content": msg.content,
+            "tool_calls": tool_calls,
+            "completion_tokens": getattr(r.usage, "completion_tokens", 0) or 0,
+            "model": self.model_id,
+        }

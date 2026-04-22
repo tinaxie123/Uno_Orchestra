@@ -37,3 +37,32 @@ class BaseRouter(ABC):
             context: Optional benchmark-specific context (e.g. repo name, task instruction)
         """
         ...
+
+    # ----------------------------------------------------------------
+    # Multi-turn interface (used by interactive benchmarks like
+    # Terminal-Bench). Routers that wrap a single chat-completions-style
+    # API (Direct, Random, Oracle) inherit the default; composite routers
+    # (Planner, SkillRouterSFT) can override with their own orchestration.
+    # ----------------------------------------------------------------
+
+    def chat_completions(self, messages, tools=None, **kwargs):
+        """Multi-turn chat-completions call with optional tool definitions.
+
+        Returns a dict-shaped response:
+            {
+                "content": str | None,
+                "tool_calls": [
+                    {"id": str, "name": str, "arguments": dict},
+                    ...
+                ],
+                "completion_tokens": int,
+                "model": str,
+            }
+
+        Default implementation raises ``NotImplementedError``; routers that
+        participate in interactive benchmarks override this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement chat_completions(); "
+            "override this method to use interactive benchmarks."
+        )

@@ -1,124 +1,166 @@
 """
-Terminal-Bench 2.0 benchmark adapter.
+Terminal-Bench 2.0 — Planner + SubAgent pipeline.
 
-Architecture (following AOrchestra):
-  TerminalBench (BaseBenchmark)
-    └── interactive_verify() — multi-turn: router ↔ Docker
-          └── DockerExecutor — container lifecycle, exec, test, cleanup
-                └── DockerComposeManager — compose up/down, signal handling
+Two levels of agents, both our own code:
 
-Two modes:
-  1. Interactive: router ↔ Docker multi-turn with real shell feedback (primary)
-  2. One-shot: router generates commands → execute → verify (fallback)
+  Planner (``router.chat_completions``)
+    → decides ``delegate_task(worker_model, instruction)`` or ``submit(reason)``
+
+  SubAgent (``agent_system.agents.subagent.SubAgent``)
+    → runs multi-turn shell commands inside the Docker container,
+      observes output, reports a structured status back to the Planner
+
+The planner's view is a chat-completions call with two OpenAI tools:
+``delegate_task`` and ``submit``. Routers that participate inherit the default
+``BaseRouter.chat_completions`` (Direct, Oracle, Random) or override it with
+their own orchestration (PlannerRouter / SkillRouterSFT). When the planner
+calls ``submit`` — or the attempt budget is exhausted — we run the container's
+``test.sh`` via ``DockerExecutor.run_tests()`` and read the reward file.
 """
+
+from __future__ import annotations
+
 import asyncio
-import os
-import re
-import json
 import glob
-import subprocess
-import time
+import json
 import logging
+import os
+import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseBenchmark, Task, VerifyResult
 
 try:
     import tomllib
 except ImportError:
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 HARBOR_TASKS_DIR = "/home/xieht/.cache/harbor/tasks/packages/terminal-bench"
-COMPOSE_YAML = Path(__file__).parent.parent / "executors" / "docker-compose-build.yaml"
+COMPOSE_YAML = (
+    Path(__file__).parent.parent / "executors" / "docker-compose-build.yaml"
+)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# System prompt for interactive mode
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ----------------------------------------------------------------------
+# Planner-side prompt and tool definitions
+# ----------------------------------------------------------------------
 
-INTERACTIVE_SYSTEM_PROMPT = """\
-You are completing a terminal/systems task inside a Docker container.
-Execute shell commands step by step to accomplish the task.
+PLANNER_SYSTEM_PROMPT = """\
+You are the Planner for a Docker-based terminal task. You do NOT execute shell
+commands directly. Instead, you delegate work to a worker sub-agent that runs
+inside a persistent Docker container.
 
-Respond with EXACTLY this format each turn:
+## Tools
+- delegate_task(worker_model, instruction)
+    Delegate a concrete sub-task to the given worker model. The worker runs
+    shell commands in the container (state persists across delegations), then
+    returns a structured report: status (done/partial/error), what it did,
+    any issues.
+- submit(reason)
+    Declare the whole task complete. The harness runs the task's test.sh;
+    the reward file decides pass/fail.
 
-DISCUSSION
-<your step-by-step reasoning>
-COMMAND
-<single shell command>
-
-When the task is complete:
-
-DISCUSSION
-<summary of what you accomplished>
-COMMAND
-finish
-
-RULES:
-- ONE command per turn. Wait for output before the next step.
-- You are root. The working directory is set by the container.
-- For package installs: use DEBIAN_FRONTEND=noninteractive and -y flags.
-- If dpkg lock error: run `kill $(lsof -t /var/lib/dpkg/lock-frontend) 2>/dev/null; rm -f /var/lib/dpkg/lock*` first.
-- Before installing, check if tools exist: `which <tool>` or `command -v <tool>`.
-- Prefer pip/conda over apt when possible (faster, fewer lock issues).
-- Long commands: chain with && to avoid partial failure.
-- If a command times out, try a simpler alternative.
+## Rules
+- Each delegate_task consumes one attempt. The container persists, so later
+  delegations see the previous worker's changes.
+- Start by delegating a concrete subtask, not by describing the whole task.
+- After the worker returns `status=done`, inspect its `completed` list and
+  `issues`. If it really addressed every requirement, call `submit`; if not,
+  delegate another subtask with explicit instructions for what is missing.
+- You are root in the container. Ubuntu + apt + pip available. Use
+  DEBIAN_FRONTEND=noninteractive and -y for any apt installs.
+- Prefer small, verifiable delegations over one monolithic "do everything".
 """
 
-INTERACTIVE_SUBAGENT_PROMPT = """\
-You are an orchestrator completing a terminal/systems task inside a Docker container.
-You can either execute commands directly OR delegate to a specialized LLM for help.
+TOOLS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_task",
+            "description": (
+                "Delegate a concrete sub-task to a worker model that runs shell "
+                "commands in the shared Docker container."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "worker_model": {
+                        "type": "string",
+                        "description": (
+                            "Worker model id, e.g. 'Qwen/Qwen2.5-7B-Instruct', "
+                            "'claude-opus-4-6', 'gpt-5.3-codex'."
+                        ),
+                    },
+                    "instruction": {
+                        "type": "string",
+                        "description": (
+                            "Self-contained natural-language instructions for the "
+                            "worker. Include every detail the worker needs; it "
+                            "cannot see the original task."
+                        ),
+                    },
+                },
+                "required": ["worker_model", "instruction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit",
+            "description": (
+                "Declare the task complete. Runs the container's test.sh and "
+                "finishes this trial with the resulting reward."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief justification for why the task is complete.",
+                    }
+                },
+                "required": ["reason"],
+            },
+        },
+    },
+]
 
-Each turn, respond with ONE of these formats:
 
-Option A — Execute a command yourself:
-DISCUSSION
-<reasoning>
-COMMAND
-<single shell command>
-
-Option B — Ask a specialized LLM for help:
-DISCUSSION
-<reasoning about which model to use and why>
-COMMAND
-<search> ModelName:Your question or request </search>
-
-Available models (input/output $/1M tokens):
-Gemini-2.5-Flash-Lite($0.10/$0.40) Gemini-2.5-Flash($0.30/$2.50) Kimi-K2.5($0.35/$2.50)
-Gemini-3-Flash-Preview($0.50/$3) Claude-Haiku-4.5($1/$5) GPT-5.3-Codex($1.75/$14)
-GPT-5.4($2.50/$15) Claude-Sonnet-4.6($3/$15) Claude-Opus-4.6($5/$25)
-
-The LLM response will appear as [API ...]: <response>. You can then use that to write commands.
-
-When done:
-DISCUSSION
-<summary>
-COMMAND
-finish
-
-RULES:
-- ONE action per turn (either a shell command or a <search> call).
-- Use cheap models for simple questions, expensive ones for complex code/reasoning.
-- You are root inside the container. Use DEBIAN_FRONTEND=noninteractive for apt.
-"""
+def _budget_note(attempt_idx: int, max_attempts: int) -> str:
+    remaining = max_attempts - attempt_idx
+    if remaining <= 2:
+        return f"🚨 CRITICAL: Only {remaining} attempt(s) left — submit now if nearly done."
+    if remaining <= 4:
+        return f"⚠️ Warning: {remaining} attempts remaining — plan carefully."
+    return f"Budget: {remaining}/{max_attempts} attempts remaining."
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TerminalBench benchmark
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ----------------------------------------------------------------------
+# Benchmark
+# ----------------------------------------------------------------------
+
 
 class TerminalBench(BaseBenchmark):
 
-    def __init__(self, harbor_dir=HARBOR_TASKS_DIR,
-                 max_steps=30, docker_timeout=600, verifier_timeout=900):
+    def __init__(
+        self,
+        harbor_dir: str = HARBOR_TASKS_DIR,
+        max_attempts: int = 8,
+        subagent_max_steps: int = 20,
+        subagent_cmd_timeout: int = 300,
+        docker_timeout: int = 600,
+        verifier_timeout: int = 900,
+    ):
         self.harbor_dir = harbor_dir
-        self.max_steps = max_steps
+        self.max_attempts = max_attempts
+        self.subagent_max_steps = subagent_max_steps
+        self.subagent_cmd_timeout = subagent_cmd_timeout
         self.docker_timeout = docker_timeout
         self.verifier_timeout = verifier_timeout
-        # Lazy-init docker manager (only when interactive mode is used)
         self._docker_manager = None
 
     @property
@@ -131,481 +173,285 @@ class TerminalBench(BaseBenchmark):
             self._docker_manager = DockerComposeManager(COMPOSE_YAML)
         return self._docker_manager
 
-    # ─── Task loading ───────────────────────────────────────────
+    # ----- task loading ------------------------------------------------
 
-    def load(self, max_tasks=None) -> List[Task]:
-        """Load tasks directly from harbor cache (instruction.md + task.toml)."""
-        tasks = []
-        for task_dir_name in sorted(os.listdir(self.harbor_dir)):
-            task_base = os.path.join(self.harbor_dir, task_dir_name)
-            if not os.path.isdir(task_base):
+    def load(self, max_tasks: Optional[int] = None) -> List[Task]:
+        tasks: List[Task] = []
+        for name in sorted(os.listdir(self.harbor_dir)):
+            base = os.path.join(self.harbor_dir, name)
+            if not os.path.isdir(base):
                 continue
-            sub_dirs = glob.glob(os.path.join(task_base, "*/task.toml"))
-            if not sub_dirs:
+            tomls = glob.glob(os.path.join(base, "*/task.toml"))
+            if not tomls:
                 continue
-            task_dir = os.path.dirname(sub_dirs[0])
-
-            # Read instruction
+            task_dir = os.path.dirname(tomls[0])
             instr_path = os.path.join(task_dir, "instruction.md")
             instruction = ""
             if os.path.exists(instr_path):
                 instruction = open(instr_path).read().strip()
             if not instruction:
                 continue
-
-            # Read task.toml
             with open(os.path.join(task_dir, "task.toml"), "rb") as f:
                 config = tomllib.load(f)
-
-            tasks.append(Task(
-                task_id=task_dir_name,
-                raw={"config": config, "task_dir": task_dir},
-                question=f"Task: {instruction}",
-                context={"task_instruction": instruction},
-            ))
-
+            tasks.append(
+                Task(
+                    task_id=name,
+                    raw={"config": config, "task_dir": task_dir},
+                    question=f"Task: {instruction}",
+                    context={"task_instruction": instruction},
+                )
+            )
             if max_tasks and len(tasks) >= max_tasks:
                 break
         return tasks
 
     def extract_answer(self, router_output: str, task: Task) -> str:
-        return router_output
+        return router_output  # unused — interactive pipeline
 
-    # ─── Interactive mode: router ↔ Docker (AOrchestra style) ──
+    def verify(self, task: Task, answer: str, logs_dir=None) -> VerifyResult:
+        raise NotImplementedError(
+            "TerminalBench is interactive; use run_interactive(task, router, ...)"
+        )
 
-    def interactive_verify(self, task: Task, router, logs_dir=None) -> VerifyResult:
+    # ----- main interactive pipeline -----------------------------------
+
+    def run_interactive(
+        self,
+        task: Task,
+        router,
+        worker_pool: Optional[List[str]] = None,
+        subagent_api_base: Optional[str] = None,
+        subagent_api_key: str = "EMPTY",
+        logs_dir: Optional[str] = None,
+    ) -> VerifyResult:
+        """Run Planner (``router``) + SubAgent(s) against ``task``.
+
+        Args:
+            task: A Task from ``self.load()``.
+            router: A BaseRouter with ``chat_completions(messages, tools)``.
+            worker_pool: Worker models the Planner may delegate to. If the
+                Planner picks a model outside this list, we substitute the
+                first element (keeps baselines honest). If None, any model is
+                accepted.
+            subagent_api_base: Base URL for the SubAgent's worker LLM. Defaults
+                to the router's own ``api_base`` if available, else the config
+                default.
+            subagent_api_key: API key for the SubAgent worker LLM.
+            logs_dir: Where to save trajectory + commands log.
         """
-        Multi-turn interactive evaluation using AOrchestra's executor:
-        1. Start container via docker-compose (supports prebuilt image + Dockerfile build)
-        2. Router outputs DISCUSSION + COMMAND
-        3. Command executes in container → real output returned
-        4. Repeat until 'finish' or max_steps
-        5. Run test.sh via executor → read reward
-        """
-        # Create a new event loop for this thread (ThreadPoolExecutor doesn't have one)
         loop = asyncio.new_event_loop()
         try:
             return loop.run_until_complete(
-                self._async_interactive_verify(task, router, logs_dir)
+                self._run_async(task, router, worker_pool, subagent_api_base, subagent_api_key, logs_dir)
             )
         finally:
             loop.close()
 
-    async def _async_interactive_verify(self, task: Task, router, logs_dir=None) -> VerifyResult:
+    async def _run_async(
+        self,
+        task: Task,
+        router,
+        worker_pool: Optional[List[str]],
+        subagent_api_base: Optional[str],
+        subagent_api_key: str,
+        logs_dir: Optional[str],
+    ) -> VerifyResult:
         from ..executors import DockerExecutor
+        from agent_system.agents.subagent import SubAgent
 
-        # Parse task config
-        config = task.raw.get("config", {})
+        cfg = task.raw.get("config", {})
         task_dir = Path(task.raw.get("task_dir", ""))
-        if not config:
-            # Fallback: load from harbor
-            config, task_dir_str = self._get_task_config(task.task_id)
-            if not config:
-                return VerifyResult(task.task_id, 0.0, error=f"No config for {task.task_id}")
-            task_dir = Path(task_dir_str)
+        if not cfg or not task_dir:
+            return VerifyResult(task.task_id, 0.0, error="missing config/task_dir")
 
-        # Setup log directories
-        task_logs = Path(logs_dir or "/tmp") / task.task_id
-        verifier_logs = task_logs / "verifier"
-        agent_logs = task_logs / "agent"
+        base = Path(logs_dir or "/tmp/tb_runs") / task.task_id
+        verifier_logs = base / "verifier"
+        agent_logs = base / "agent"
         verifier_logs.mkdir(parents=True, exist_ok=True)
         agent_logs.mkdir(parents=True, exist_ok=True)
 
-        log = ""
+        # Resolve SubAgent endpoint: prefer the worker API base set on the router
+        if subagent_api_base is None:
+            for attr in ("sub_model_api_base", "api_base", "_api_base"):
+                if hasattr(router, attr):
+                    subagent_api_base = getattr(router, attr)
+                    if subagent_api_base:
+                        break
+        if subagent_api_base is None:
+            from ..config import DEFAULT_API_BASE
+            subagent_api_base = DEFAULT_API_BASE
 
-        # Create executor (AOrchestra's DockerExecutor)
+        subagent = SubAgent(
+            api_base=subagent_api_base,
+            api_key=subagent_api_key,
+            max_steps=self.subagent_max_steps,
+            cmd_timeout=self.subagent_cmd_timeout,
+        )
+
         executor = DockerExecutor(
             task_id=task.task_id,
             task_dir=task_dir,
-            task_config=config,
+            task_config=cfg,
             verifier_logs_dir=verifier_logs,
             agent_logs_dir=agent_logs,
             docker_manager=self._get_docker_manager(),
             docker_timeout=self.docker_timeout,
         )
 
-        CMD_RE = re.compile(r"COMMAND\s*\n(.+?)(?:\n\n|\Z)", re.DOTALL)
+        instruction = task.context.get("task_instruction", task.question)
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"## Task\n{instruction}\n\n"
+                f"## Planner budget\nYou have {self.max_attempts} delegation attempts.\n"
+            )},
+        ]
+
+        trajectory: List[Dict[str, Any]] = []
+        reward = 0.0
+        submit_called = False
+        last_error: Optional[str] = None
 
         try:
-            # Start container (docker-compose: supports Dockerfile build + prebuilt)
             await executor.start_container()
 
-            # Build messages
-            instruction = task.context.get("task_instruction", task.question)
-            messages = [
-                {"role": "system", "content": INTERACTIVE_SYSTEM_PROMPT},
-                {"role": "user", "content": f"## Task\n{instruction}"},
-            ]
+            for attempt in range(self.max_attempts):
+                # Inject a short budget note (not persisted in trajectory ctx)
+                live_messages = messages + [
+                    {"role": "system", "content": _budget_note(attempt + 1, self.max_attempts)}
+                ]
 
-            # Multi-turn loop
-            for step in range(self.max_steps):
-                # Router generates next action
                 try:
-                    resp = router.local.chat.completions.create(
-                        model=router.model_name,
-                        messages=messages,
-                        temperature=0.0,
-                        max_tokens=2048,
-                    )
-                    assistant_text = resp.choices[0].message.content or ""
+                    resp = router.chat_completions(live_messages, tools=TOOLS)
+                except NotImplementedError as e:
+                    last_error = f"router {type(router).__name__} lacks chat_completions: {e}"
+                    break
                 except Exception as e:
-                    log += f"\n[ROUTER ERROR step {step}: {e}]"
+                    last_error = f"planner call failed: {e}"
                     break
 
-                messages.append({"role": "assistant", "content": assistant_text})
-                log += f"\n[STEP {step+1}] ASSISTANT:\n{assistant_text[:500]}\n"
+                content = resp.get("content") or ""
+                tool_calls = resp.get("tool_calls") or []
+                assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content or None}
+                if tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {"id": t["id"], "type": "function",
+                         "function": {"name": t["name"], "arguments": json.dumps(t["arguments"])}}
+                        for t in tool_calls
+                    ]
+                messages.append(assistant_msg)
 
-                # Parse COMMAND
-                cmd_match = CMD_RE.search(assistant_text)
-                if not cmd_match:
-                    log += "[NO COMMAND FOUND]\n"
+                trajectory.append({
+                    "attempt": attempt + 1,
+                    "planner_content": content,
+                    "tool_calls": tool_calls,
+                })
+
+                if not tool_calls:
+                    # No structured action — treat as planner refusal and stop.
+                    last_error = "planner returned no tool call"
                     break
 
-                command = cmd_match.group(1).strip().split("\n")[0].strip()
+                # Process each tool call (usually one per turn)
+                did_submit = False
+                for tc in tool_calls:
+                    name = tc.get("name")
+                    args = tc.get("arguments", {}) or {}
+                    tc_id = tc.get("id", f"tc_{attempt}")
 
-                if command.lower() == "finish":
-                    log += "[FINISH]\n"
+                    if name == "submit":
+                        reason = args.get("reason", "(no reason)")
+                        trajectory[-1]["submit"] = {"reason": reason}
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc_id,
+                            "content": "Submission received; verifier will run.",
+                        })
+                        did_submit = True
+                        break  # stop processing further tool calls this turn
+
+                    if name == "delegate_task":
+                        worker_model = args.get("worker_model") or ""
+                        subtask_instruction = args.get("instruction") or ""
+                        # Clamp worker to the allowed pool for baselines
+                        if worker_pool and worker_model not in worker_pool:
+                            worker_model = worker_pool[0]
+                        if not subtask_instruction.strip():
+                            msg = "Empty instruction; delegate_task skipped."
+                            messages.append({"role": "tool", "tool_call_id": tc_id, "content": msg})
+                            trajectory[-1]["delegate"] = {"error": msg}
+                            continue
+
+                        try:
+                            sub_result = await subagent.run(
+                                model=worker_model,
+                                task_instruction=subtask_instruction,
+                                original_question=instruction,
+                                executor=executor,
+                                agent_logs_dir=agent_logs,
+                            )
+                        except Exception as e:
+                            sub_result = {
+                                "status": "error",
+                                "completed": [], "issues": [str(e)[:300]],
+                                "message": f"SubAgent crashed: {e}",
+                                "steps_taken": 0, "model": worker_model, "commands_log": [],
+                            }
+
+                        planner_view = SubAgent.format_result_for_planner(sub_result)
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc_id,
+                            "content": planner_view,
+                        })
+                        trajectory[-1]["delegate"] = {
+                            "worker_model": worker_model,
+                            "instruction": subtask_instruction[:500],
+                            "sub_result": {
+                                k: sub_result.get(k) for k in (
+                                    "status", "steps_taken", "completed", "issues", "message",
+                                )
+                            },
+                        }
+                    else:
+                        msg = f"Unknown tool '{name}'; ignored."
+                        messages.append({"role": "tool", "tool_call_id": tc_id, "content": msg})
+
+                if did_submit:
+                    submit_called = True
                     break
 
-                # Execute in Docker via executor (async, proper timeout)
-                output, exit_code = await executor.execute_command(command, timeout=300)
-                output = output[-2000:]  # truncate
-
-                obs = f"[Step {step+1}/{self.max_steps}] exit_code={exit_code}\n{output}"
-                log += f"[STEP {step+1}] CMD: {command}\n[OUTPUT] {output[:500]}\n"
-                messages.append({"role": "user", "content": obs})
-
-                # Log command to agent log file
-                cmd_log = agent_logs / "commands.log"
-                with cmd_log.open("a") as f:
-                    f.write(f"[Step {step+1}] {command}\nExit: {exit_code}\n{output[:1000]}\n{'-'*60}\n")
-
-            # Run verification tests via executor
-            reward = await executor.run_tests()
-            log += f"\n[VERIFIER] reward={reward}\n"
-
-            # Save trace
-            with (task_logs / "trace.log").open("w") as f:
-                f.write(log)
-
-            return VerifyResult(task.task_id, reward, log=log[-3000:])
+            # Run tests once — either because planner submitted or budget ran out.
+            try:
+                reward = float(await executor.run_tests() or 0.0)
+            except Exception as e:
+                last_error = f"run_tests failed: {e}"
+                reward = 0.0
 
         except Exception as e:
-            logger.error(f"[{task.task_id}] interactive_verify failed: {e}")
-            return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[-3000:])
+            last_error = f"pipeline exception: {e}"
+            logger.exception("[%s] interactive pipeline failed", task.task_id)
         finally:
             try:
                 await executor.cleanup()
             except Exception as e:
-                logger.warning(f"[{task.task_id}] cleanup failed: {e}")
+                logger.warning("[%s] cleanup failed: %s", task.task_id, e)
 
-    # ─── One-shot mode (fallback for non-interactive routers) ──
-
-    def verify(self, task: Task, answer: str, logs_dir=None) -> VerifyResult:
-        """One-shot: extract commands from answer → execute in Docker → run test.sh."""
-        config = task.raw.get("config", {})
-        task_dir_str = task.raw.get("task_dir", "")
-        if not config:
-            config, task_dir_str = self._get_task_config(task.task_id)
-        if not config:
-            return VerifyResult(task.task_id, 0.0, error=f"No config for {task.task_id}")
-
-        env_cfg = config.get("environment", {})
-        docker_image = env_cfg.get("docker_image", "")
-        if not docker_image:
-            return VerifyResult(task.task_id, 0.0, error="No docker_image")
-
-        tests_dir = os.path.join(task_dir_str, "tests")
-        if not os.path.isdir(tests_dir):
-            return VerifyResult(task.task_id, 0.0, error="No tests dir")
-
-        container = f"eval_{task.task_id}_{int(time.time())}"
-        task_logs = os.path.join(logs_dir or "/tmp", task.task_id)
-        verifier_logs = os.path.join(task_logs, "verifier")
-        os.makedirs(verifier_logs, exist_ok=True)
-
-        cpus = env_cfg.get("cpus", 1)
-        mem = env_cfg.get("memory_mb", 2048)
-        v_timeout = int(config.get("verifier", {}).get("timeout_sec", self.verifier_timeout))
-        log = ""
-
+        # Save trajectory
         try:
-            subprocess.run(["docker", "pull", docker_image], capture_output=True, timeout=300)
-            rc = subprocess.run([
-                "docker", "run", "-d", "--name", container,
-                "--cpus", str(cpus), "--memory", f"{mem}m",
-                "-v", f"{verifier_logs}:/logs/verifier",
-                docker_image, "sleep", str(v_timeout + 120),
-            ], capture_output=True, text=True, timeout=60)
-            if rc.returncode != 0:
-                return VerifyResult(task.task_id, 0.0, error=f"docker run: {rc.stderr[:300]}")
-
-            commands = self._extract_commands(answer)
-            script_path = os.path.join(task_logs, "solution.sh")
-            with open(script_path, "w") as f:
-                f.write(f"#!/bin/bash\nset -e\n{commands}\n")
-            subprocess.run(["docker", "cp", script_path, f"{container}:/tmp/solution.sh"],
-                           capture_output=True, timeout=30)
-            ep = subprocess.run(
-                ["docker", "exec", container, "bash", "/tmp/solution.sh"],
-                capture_output=True, text=True,
-                timeout=min(self.docker_timeout, 600),
-            )
-            log += f"AGENT stdout:\n{ep.stdout[-1000:]}\nstderr:\n{ep.stderr[-1000:]}\n"
-
-            subprocess.run(["docker", "cp", tests_dir, f"{container}:/tests"],
-                           capture_output=True, timeout=30)
-            subprocess.run(["docker", "exec", container, "mkdir", "-p", "/logs/verifier"],
-                           capture_output=True, timeout=10)
-            tp = subprocess.run(
-                ["docker", "exec", container, "bash", "/tests/test.sh"],
-                capture_output=True, text=True, timeout=v_timeout,
-            )
-            log += f"VERIFIER stdout:\n{tp.stdout[-1000:]}\nstderr:\n{tp.stderr[-1000:]}\n"
-
-            reward_file = os.path.join(verifier_logs, "reward.txt")
-            if not os.path.exists(reward_file):
-                subprocess.run(
-                    ["docker", "cp", f"{container}:/logs/verifier/reward.txt", reward_file],
-                    capture_output=True, timeout=10,
-                )
-            if os.path.exists(reward_file):
-                try:
-                    reward = float(open(reward_file).read().strip())
-                except ValueError:
-                    reward = 0.0
-            else:
-                reward = 0.0
-
-            return VerifyResult(task.task_id, reward, log=log[:3000])
-
-        except subprocess.TimeoutExpired:
-            return VerifyResult(task.task_id, 0.0, error="Timeout", log=log[:3000])
-        except Exception as e:
-            return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[:3000])
-        finally:
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=30)
-
-    # ─── Helpers ───────────────────────────────────────────────
-
-    def _get_task_config(self, task_id):
-        toml_files = glob.glob(f"{self.harbor_dir}/{task_id}/*/task.toml")
-        if not toml_files:
-            return None, None
-        path = toml_files[0]
-        with open(path, "rb") as f:
-            config = tomllib.load(f)
-        return config, os.path.dirname(path)
-
-    def _extract_commands(self, answer):
-        """Extract executable bash from router output (for one-shot mode)."""
-        text = answer
-        text = re.sub(r"</?(?:think|search|answer|plan|route|subtask|verify|final_answer|obs|information)[^>]*>", "", text)
-        text = re.sub(r"\[/?(?:ASSISTANT|TOOL)\]", "", text)
-
-        blocks = re.findall(r"```(?:bash|sh|shell)?\s*\n(.*?)```", text, re.DOTALL)
-        if blocks:
-            return "\n".join(blocks)
-
-        py_blocks = re.findall(r"```(?:python)\s*\n(.*?)```", text, re.DOTALL)
-        if py_blocks:
-            return "\n".join(f"python3 << 'PYEOF'\n{pb}\nPYEOF" for pb in py_blocks)
-
-        lines = []
-        for line in text.split("\n"):
-            s = line.strip()
-            if s and not s.startswith("#") and any(s.startswith(c) for c in [
-                "sudo", "apt", "pip", "make", "gcc", "g++", "cd ", "mkdir",
-                "wget", "curl", "git ", "chmod", "cp ", "mv ", "echo ", "export",
-                "python", "npm", "cargo", "cmake", "tar ", "unzip", "sed ",
-                "cat ", "tee ", "source", "docker", "dnf", "yum", "./",
-            ]):
-                lines.append(s)
-        return "\n".join(lines) if lines else text
-
-    # ─── Pipeline mode: Planner (multi-turn) → Router → SubAgent ↔ Docker ──
-    #
-    # Architecture:
-    #   Planner (local LLM, tool-calling, multi-turn up to 8 steps)
-    #     └── plan_subtask(instruction, task_id)
-    #           └── Router (local LLM) selects API model + skill
-    #                 └── SubAgent (API model) multi-turn Docker loop
-    #                       execute → observe → execute → ... → finish
-    #                       returns structured report to Planner
-    #     └── plan_subtask(instruction2, task_id2)  ← Planner sees result, plans next
-    #     └── finish(answer)
-    #   After Planner finishes → run verification tests in same container
-
-    def pipeline_verify(self, task: Task, args, pools, logs_dir=None) -> VerifyResult:
-        """Planner + Router + SubAgent pipeline with multi-turn Docker interaction."""
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(
-                self._async_pipeline_verify(task, args, pools, logs_dir)
-            )
-        finally:
-            loop.close()
-
-    async def _async_pipeline_verify(self, task, args, pools, logs_dir=None):
-        import sys
-        import random as _random
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
-        from scripts.data.router import aroute_subtask
-        from scripts.data.planner import arun_planner
-        from agent_system.agents import SubAgent
-        from ..executors import DockerExecutor
-
-        config = task.raw.get("config", {})
-        task_dir = Path(task.raw.get("task_dir", ""))
-        if not config:
-            config, task_dir_str = self._get_task_config(task.task_id)
-            if not config:
-                return VerifyResult(task.task_id, 0.0, error=f"No config for {task.task_id}")
-            task_dir = Path(task_dir_str)
-
-        task_logs = Path(logs_dir or "/tmp") / task.task_id
-        verifier_logs = task_logs / "verifier"
-        agent_logs = task_logs / "agent"
-        verifier_logs.mkdir(parents=True, exist_ok=True)
-        agent_logs.mkdir(parents=True, exist_ok=True)
-
-        log = ""
-        models_used = []
-        skills_used = []
-
-        # ── worker-selection mode: how each subtask picks its sub-agent model ──
-        worker_mode = getattr(args, "worker_mode", "learned")
-        strongest_model = getattr(args, "strongest_model", "claude-opus-4-6")
-        backbone_model = args.local_model or "Qwen/Qwen2.5-7B-Instruct"
-        valid_modes = {"backbone", "random", "learned", "strongest"}
-        if worker_mode not in valid_modes:
-            raise ValueError(f"worker_mode must be one of {valid_modes}, got {worker_mode!r}")
-
-        # For "backbone" the sub-agent IS the local LLM, so point at local vLLM.
-        if worker_mode == "backbone":
-            subagent_api_base = args.local_base
-            subagent_api_key = "EMPTY"
-        else:
-            subagent_api_base = args.api_base
-            subagent_api_key = args.api_key
-
-        executor = DockerExecutor(
-            task_id=task.task_id,
-            task_dir=task_dir,
-            task_config=config,
-            verifier_logs_dir=verifier_logs,
-            agent_logs_dir=agent_logs,
-            docker_manager=self._get_docker_manager(),
-            docker_timeout=self.docker_timeout,
-        )
-
-        # Create SubAgent (multi-turn Docker executor)
-        subagent = SubAgent(
-            api_base=subagent_api_base,
-            api_key=subagent_api_key,
-            max_steps=30,
-            cmd_timeout=300,
-        )
-
-        try:
-            await executor.start_container()
-            instruction = task.context.get("task_instruction", task.question)
-
-            # ── execute_subtask: called by Planner for each plan_subtask() ──
-            async def execute_subtask(subtask_instruction: str, task_id: str) -> str:
-                """Pick sub-agent model per worker_mode → run multi-turn in Docker → return report."""
-                # 1. Select the sub-agent model for this subtask
-                if worker_mode == "backbone":
-                    selected_model, selected_skill = backbone_model, "execute_shell"
-                elif worker_mode == "random":
-                    selected_model = _random.choice(pools["models"])
-                    selected_skill = "execute_shell"
-                elif worker_mode == "strongest":
-                    selected_model, selected_skill = strongest_model, "execute_shell"
-                else:  # learned
-                    selected_model, selected_skill = await aroute_subtask(
-                        instruction=subtask_instruction,
-                        model=args.local_model or "Qwen/Qwen2.5-7B-Instruct",
-                        api_base=args.local_base, api_key="none",
-                        pools=pools, temperature=0.3,
-                    )
-                models_used.append(selected_model)
-                skills_used.append(selected_skill)
-
-                # 2. SubAgent multi-turn Docker interaction
-                result = await subagent.run(
-                    model=selected_model,
-                    task_instruction=subtask_instruction,
-                    original_question=instruction,
-                    executor=executor,
-                    agent_logs_dir=agent_logs,
-                )
-
-                # 3. Format result for Planner to read
-                report = SubAgent.format_result_for_planner(result)
-                return report
-
-            # ── Planner system prompt for TerminalBench ──
-            tb_planner_prompt = (
-                "You are an orchestrator completing a terminal/systems task inside a Docker container.\n"
-                "Your sub-agents will execute shell commands in the container step by step.\n"
-                "The same container persists across all subtasks — work is preserved.\n\n"
-                "Tools:\n"
-                "- plan_subtask(instruction, task_id): delegate to a specialist who will run commands in Docker.\n"
-                "  The specialist executes commands one at a time and sees real output.\n"
-                "  Your instruction should describe WHAT to accomplish, not exact commands.\n"
-                "  Example: 'Install nginx, configure it to serve /var/www/html on port 8080, and verify it works.'\n"
-                "- finish(answer): call when all work is done. The answer should be 'done'.\n\n"
-                "Rules:\n"
-                "1. Break the task into logical subtasks: install deps, write code, configure, test.\n"
-                "2. Read the sub-agent's report carefully — it tells you what succeeded and what failed.\n"
-                "3. If a subtask reports issues, create a follow-up subtask to fix them.\n"
-                "4. Only call finish('done') when you believe all requirements are met.\n"
-                "5. You are root in the container. The sub-agent knows to use DEBIAN_FRONTEND=noninteractive.\n"
-            )
-
-            # ── Run Planner (multi-turn, tool-calling) ──
-            planner_result = await arun_planner(
-                question=instruction,
-                model=args.local_model or "Qwen/Qwen2.5-7B-Instruct",
-                api_base=args.local_base, api_key="none",
-                execute_subtask_fn=execute_subtask,
-                temperature=0.7,
-                system_prompt=tb_planner_prompt,
-            )
-
-            log += f"[PIPELINE] complete={planner_result.get('complete')} models={models_used} skills={skills_used}\n"
-            log += f"[ANSWER] {str(planner_result.get('answer',''))[:300]}\n"
-
-            # Log subtask details
-            for st in planner_result.get("subtasks", []):
-                log += f"  [{st.get('task_id')}] {st.get('instruction','')[:150]}\n"
-                log += f"    result: {st.get('result','')[:200]}\n"
-
-            # Save trajectory
-            with (task_logs / "pipeline_result.json").open("w") as f:
+            with (base / "trajectory.json").open("w") as f:
                 json.dump({
                     "task_id": task.task_id,
-                    "result": planner_result,
-                    "models_used": models_used,
-                    "skills_used": skills_used,
-                    "log": log,
-                }, f, indent=2, default=str)
+                    "reward": reward,
+                    "submit_called": submit_called,
+                    "attempts_used": len(trajectory),
+                    "max_attempts": self.max_attempts,
+                    "last_error": last_error,
+                    "trajectory": trajectory,
+                }, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
 
-            # ── Run verification tests in same container ──
-            reward = await executor.run_tests()
-            log += f"[REWARD] {reward}\n"
-
-            with (task_logs / "trace.log").open("w") as f:
-                f.write(log)
-
-            return VerifyResult(task.task_id, reward, log=log[-3000:])
-
-        except Exception as e:
-            logger.error(f"[{task.task_id}] pipeline_verify failed: {e}")
-            return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[-3000:])
-        finally:
-            try:
-                await executor.cleanup()
-            except Exception:
-                pass
+        return VerifyResult(
+            task.task_id, reward,
+            error=last_error,
+            log=json.dumps({"attempts": len(trajectory), "submit": submit_called})[:3000],
+        )

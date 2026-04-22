@@ -154,10 +154,33 @@ class SubAgent:
 
             messages.append({"role": "assistant", "content": raw})
 
-            # Parse action
-            action = _parse_action(raw)
-            action_type = action.get("action", "")
-            params = action.get("params", {})
+            # Parse action. Wrap parsing+dispatch in try/except so a single
+            # malformed response never bubbles out of the whole SubAgent loop.
+            try:
+                action = _parse_action(raw)
+                action_type = action.get("action", "") if isinstance(action, dict) else ""
+                params = action.get("params", {}) if isinstance(action, dict) else {}
+                # Defensive: some LLMs emit params as a plain string or null
+                # instead of a dict. Coerce so later `.get(...)` calls don't
+                # raise 'str has no attribute get'.
+                if isinstance(params, str):
+                    if action_type == "execute":
+                        params = {"command": params}
+                    elif action_type == "finish":
+                        params = {"message": params}
+                    else:
+                        params = {}
+                elif not isinstance(params, dict):
+                    params = {}
+            except Exception as _parse_err:
+                logger.warning("[SubAgent step %d] parse failure: %s",
+                               steps_taken, _parse_err)
+                messages.append({"role": "user", "content": json.dumps({
+                    "error": f"Could not parse your response: {str(_parse_err)[:120]}",
+                    "hint": 'Reply with ONLY a JSON object like '
+                            '{"action":"execute","params":{"command":"..."}}'
+                })})
+                continue
 
             # ── finish ──
             if action_type == "finish":
