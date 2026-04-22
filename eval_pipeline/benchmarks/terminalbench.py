@@ -75,6 +75,31 @@ inside a persistent Docker container.
 - Prefer small, verifiable delegations over one monolithic "do everything".
 """
 
+
+FLAT_SYSTEM_PROMPT = """\
+You are completing a terminal / systems task inside a persistent Docker
+container. You execute shell commands yourself, one per turn, observing each
+output before the next command.
+
+## Tools
+- execute_command(command)
+    Run a single shell command in the container. You will see stdout/stderr
+    and the exit code. State persists between commands.
+- submit(reason)
+    Declare the whole task complete. The harness runs the task's test.sh;
+    the reward file decides pass/fail.
+
+## Rules
+- One command per turn. Wait for the output, then choose the next command.
+- You are root in the container. Ubuntu + apt + pip available.
+- For apt: use DEBIAN_FRONTEND=noninteractive and -y flags; if a dpkg lock is
+  held, kill and clean it before retrying.
+- Chain with && when a sequence must succeed together. Long-running commands
+  may time out.
+- Call submit only after the task is actually complete.
+"""
+
+
 TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
@@ -127,6 +152,31 @@ TOOLS: List[Dict[str, Any]] = [
             },
         },
     },
+]
+
+
+FLAT_TOOLS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_command",
+            "description": (
+                "Run a single shell command in the persistent Docker container "
+                "and return its stdout/stderr and exit code."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run (one per call).",
+                    }
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    TOOLS[1],  # submit tool — same as hierarchical mode
 ]
 
 
@@ -223,24 +273,30 @@ class TerminalBench(BaseBenchmark):
         subagent_api_base: Optional[str] = None,
         subagent_api_key: str = "EMPTY",
         logs_dir: Optional[str] = None,
+        flat_mode: bool = False,
     ) -> VerifyResult:
-        """Run Planner (``router``) + SubAgent(s) against ``task``.
+        """Run the router on ``task``.
 
         Args:
             task: A Task from ``self.load()``.
             router: A BaseRouter with ``chat_completions(messages, tools)``.
-            worker_pool: Worker models the Planner may delegate to. If the
-                Planner picks a model outside this list, we substitute the
-                first element (keeps baselines honest). If None, any model is
-                accepted.
-            subagent_api_base: Base URL for the SubAgent's worker LLM. Defaults
-                to the router's own ``api_base`` if available, else the config
-                default.
-            subagent_api_key: API key for the SubAgent worker LLM.
+            worker_pool: Hierarchical mode only — worker models the Planner may
+                delegate to. Ignored in flat mode.
+            subagent_api_base: Hierarchical mode — base URL for the SubAgent's
+                worker LLM. Ignored in flat mode.
+            subagent_api_key: SubAgent API key (hierarchical mode).
             logs_dir: Where to save trajectory + commands log.
+            flat_mode: If True, run as a **direct** single-agent baseline:
+                the router itself outputs ``execute_command``/``submit`` tool
+                calls and interacts with the Docker container directly. No
+                delegation layer. Useful for Direct(X) baselines.
         """
         loop = asyncio.new_event_loop()
         try:
+            if flat_mode:
+                return loop.run_until_complete(
+                    self._run_flat_async(task, router, logs_dir)
+                )
             return loop.run_until_complete(
                 self._run_async(task, router, worker_pool, subagent_api_base, subagent_api_key, logs_dir)
             )
@@ -454,4 +510,171 @@ class TerminalBench(BaseBenchmark):
             task.task_id, reward,
             error=last_error,
             log=json.dumps({"attempts": len(trajectory), "submit": submit_called})[:3000],
+        )
+
+    # ------------------------------------------------------------------
+    # Flat / Direct-baseline pipeline: single model ↔ Docker, no Planner
+    # ------------------------------------------------------------------
+
+    async def _run_flat_async(
+        self,
+        task: Task,
+        router,
+        logs_dir: Optional[str],
+    ) -> VerifyResult:
+        from ..executors import DockerExecutor
+
+        cfg = task.raw.get("config", {})
+        task_dir = Path(task.raw.get("task_dir", ""))
+        if not cfg or not task_dir:
+            return VerifyResult(task.task_id, 0.0, error="missing config/task_dir")
+
+        base = Path(logs_dir or "/tmp/tb_runs_flat") / task.task_id
+        verifier_logs = base / "verifier"
+        agent_logs = base / "agent"
+        verifier_logs.mkdir(parents=True, exist_ok=True)
+        agent_logs.mkdir(parents=True, exist_ok=True)
+
+        executor = DockerExecutor(
+            task_id=task.task_id,
+            task_dir=task_dir,
+            task_config=cfg,
+            verifier_logs_dir=verifier_logs,
+            agent_logs_dir=agent_logs,
+            docker_manager=self._get_docker_manager(),
+            docker_timeout=self.docker_timeout,
+        )
+
+        instruction = task.context.get("task_instruction", task.question)
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": FLAT_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"## Task\n{instruction}\n\n"
+                f"## Budget\nYou may run up to {self.subagent_max_steps} commands. "
+                f"Call submit only after verifying the task is complete.\n"
+            )},
+        ]
+
+        trajectory: List[Dict[str, Any]] = []
+        reward = 0.0
+        submit_called = False
+        last_error: Optional[str] = None
+
+        try:
+            await executor.start_container()
+
+            for step in range(self.subagent_max_steps):
+                # Budget note (ephemeral)
+                live_messages = messages + [
+                    {"role": "system",
+                     "content": f"Budget: {self.subagent_max_steps - step} command(s) remaining."}
+                ]
+
+                try:
+                    resp = router.chat_completions(live_messages, tools=FLAT_TOOLS)
+                except NotImplementedError as e:
+                    last_error = f"router {type(router).__name__} lacks chat_completions: {e}"
+                    break
+                except Exception as e:
+                    last_error = f"router call failed: {e}"
+                    break
+
+                content = resp.get("content") or ""
+                tool_calls = resp.get("tool_calls") or []
+                assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content or None}
+                if tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {"id": t["id"], "type": "function",
+                         "function": {"name": t["name"], "arguments": json.dumps(t["arguments"])}}
+                        for t in tool_calls
+                    ]
+                messages.append(assistant_msg)
+                trajectory.append({
+                    "step": step + 1,
+                    "content": content,
+                    "tool_calls": tool_calls,
+                })
+
+                if not tool_calls:
+                    last_error = "router returned no tool call"
+                    break
+
+                did_submit = False
+                for tc in tool_calls:
+                    name = tc.get("name")
+                    args = tc.get("arguments", {}) or {}
+                    tc_id = tc.get("id", f"tc_{step}")
+
+                    if name == "submit":
+                        trajectory[-1]["submit"] = {"reason": args.get("reason", "")}
+                        messages.append({"role": "tool", "tool_call_id": tc_id,
+                                         "content": "Submission received; verifier will run."})
+                        did_submit = True
+                        break
+
+                    if name == "execute_command":
+                        command = (args.get("command") or "").strip()
+                        if not command:
+                            messages.append({"role": "tool", "tool_call_id": tc_id,
+                                             "content": "Empty command; ignored."})
+                            continue
+                        try:
+                            output, exit_code = await executor.execute_command(
+                                command, timeout=self.subagent_cmd_timeout,
+                            )
+                        except Exception as e:
+                            output, exit_code = f"exec error: {e}", -1
+                        output = output[-3000:]
+                        obs = json.dumps({
+                            "exit_code": exit_code,
+                            "output": output[-2000:],
+                        })
+                        messages.append({"role": "tool", "tool_call_id": tc_id, "content": obs})
+                        trajectory[-1]["execute"] = {
+                            "command": command[:500],
+                            "exit_code": exit_code,
+                            "output_tail": output[-500:],
+                        }
+                    else:
+                        messages.append({"role": "tool", "tool_call_id": tc_id,
+                                         "content": f"Unknown tool '{name}'; ignored."})
+
+                if did_submit:
+                    submit_called = True
+                    break
+
+            try:
+                reward = float(await executor.run_tests() or 0.0)
+            except Exception as e:
+                last_error = f"run_tests failed: {e}"
+                reward = 0.0
+
+        except Exception as e:
+            last_error = f"pipeline exception: {e}"
+            logger.exception("[%s] flat pipeline failed", task.task_id)
+        finally:
+            try:
+                await executor.cleanup()
+            except Exception as e:
+                logger.warning("[%s] cleanup failed: %s", task.task_id, e)
+
+        try:
+            with (base / "trajectory.json").open("w") as f:
+                json.dump({
+                    "task_id": task.task_id,
+                    "mode": "flat",
+                    "reward": reward,
+                    "submit_called": submit_called,
+                    "steps_used": len(trajectory),
+                    "max_steps": self.subagent_max_steps,
+                    "last_error": last_error,
+                    "trajectory": trajectory,
+                }, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        return VerifyResult(
+            task.task_id, reward,
+            error=last_error,
+            log=json.dumps({"steps": len(trajectory), "submit": submit_called})[:3000],
         )
