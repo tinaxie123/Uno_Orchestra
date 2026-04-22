@@ -35,9 +35,12 @@ class OracleRouter(BaseRouter):
 def cheapest_router(**kw):
     return OracleRouter("claude-haiku-4-5-20251001", "Cheapest(haiku)", **kw)
 
-def strongest_router(**kw):
-    return OracleRouter("claude-opus-4-6", "Strongest(opus)", **kw)
+def router_plus_claude(**kw):
+    return OracleRouter("claude-opus-4-6", "router+claude", **kw)
 
 def codex_router(**kw):
     return OracleRouter("gpt-5.3-codex", "Codex-Only", **kw)
+
+# Backward-compat alias: the previous name used in notebooks / scripts.
+strongest_router = router_plus_claude
 SingleRouter = OracleRouter

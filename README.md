@@ -62,21 +62,21 @@ surface-level errors on individual inputs.
 
 ## Dataset Description
 
-Of 10k sampled tasks, 4,431 (44.3%) are already solved by the current router and discarded. Of the 4,328 tasks that survive to the teacher stage, 1,365 (31.5%) yield successful SFT demonstrations and 2,963 (68.5%) enter the RL pool. The remaining 1,241 tasks are discarded as noise.
+Of 12,803 sampled tasks, 5,589 (43.7%) are already solved by the current router and discarded. 7,214 tasks survive to the teacher stage: 3,174 yield successful SFT demonstrations and 4,549 enter the RL pool. After overlong filtering (> 8,192 tokens), the final SFT set contains **2,762 trajectories** and the RL pool contains **4,549 tasks**.
 
-| Capability Axis         | Benchmarks     |    Sampled |     Router OK |       SFT |        RL | 
-| ----------------------- | -------------- | ---------: | ------------: | --------: | --------: | 
-| Atomic reasoning        | GSM8K          |        500 |   449 (89.8%) |        37 |        14 |    
-| Compositional reasoning | NuminaMath     |      1,500 | 1,098 (73.2%) |       237 |       303 |  
-| Knowledge retrieval     | DROP, HotpotQA |      3,000 | 2,113 (70.4%) |       371 |       509 |    
-| Knowledge composition   | MuSiQue        |      1,500 |   631 (42.1%) |       126 |       718 |    
-| Tool orchestration      | TACO, ToolACE  |      3,500 |    140 (4.0%) |       594 |     1,419 |    
-| **Total**               | <br />         | **10,000** |     **4,431** | **1,365** | **2,963** |  
+| Capability Axis         | Benchmarks     |    Sampled |       Router OK |       SFT |   RL Pool |
+| ----------------------- | -------------- | ---------: | --------------: | --------: | --------: |
+| Atomic reasoning        | GSM8K          |        500 |     483 (96.6%) |        40 |        19 |
+| Compositional reasoning | NuminaMath     |      1,793 |   1,191 (66.4%) |       278 |       511 |
+| Knowledge retrieval     | DROP, HotpotQA |      3,808 |   2,466 (64.8%) |       528 |       963 |
+| Knowledge composition   | MuSiQue        |      1,746 |     739 (42.3%) |       182 |     1,007 |
+| Tool orchestration      | TACO, ToolACE  |      4,956 |     710 (14.3%) |     1,734 |     2,049 |
+| **Total**               |                | **12,803** | **5,589 (43.7%)** | **2,762** | **4,549** |
 
 
-Tool orchestration receives the largest share of SFT demonstrations (43.5%) because routing decisions in this axis involve both model selection *and* skill selection — the router must learn to match coding tasks to code-capable models and API-calling tasks to tool-aware models, requiring more diverse demonstrations than axes where only model selection matters. Atomic reasoning receives the smallest share (2.7%) because the router already solves 89.8% of these tasks; the few remaining SFT examples serve primarily as a negative signal, teaching the router to recognize tasks that should *not* be decomposed into subtasks.
+Tool orchestration receives the largest share of SFT demonstrations (62.8%) because routing decisions in this axis involve both model selection *and* skill selection — the router must learn to match coding tasks to code-capable models and API-calling tasks to tool-aware models, requiring more diverse demonstrations than axes where only model selection matters. Atomic reasoning receives the smallest share (1.4%) because the router already solves 96.6% of these tasks; the remaining SFT examples serve primarily as a negative signal, teaching the router to recognize single-step tasks that should *not* be decomposed into subtasks.
 
-The high router-OK rate for atomic reasoning (89.8%) and knowledge retrieval (70.4%) confirms that a 7B parameter model can already handle single-hop factual and arithmetic tasks through direct answering. In contrast, the near-zero router-OK rate for tool orchestration (4.0%) validates our design choice to treat tool selection as a learned routing problem rather than a fixed heuristic — the current router cannot solve these tasks without training on delegation trajectories.
+The high router-OK rate for atomic reasoning (96.6%) and knowledge retrieval (64.8%) confirms that a 7B-parameter policy can already handle single-hop factual and arithmetic tasks through direct answering. In contrast, the near-zero router-OK rate for tool orchestration (14.3%) validates our design choice to treat tool selection as a learned routing problem rather than a fixed heuristic — the current router cannot solve these tasks without training on delegation trajectories.
 
 ## overview of sft dataset
 
@@ -121,7 +121,7 @@ Unified eval pipeline supporting any router on any benchmark:
 python -m eval_pipeline.run --router ROUTER --bench BENCH --api_key KEY
 
 # Routers: router-r1, skillrouter-sft, direct, random,
-#          oracle-cheapest, oracle-strongest, oracle-codex
+#          oracle-cheapest, router+claude, oracle-codex
 # Benchmarks: swebench (500 instances), terminalbench (89 tasks)
 ```
 
@@ -153,7 +153,7 @@ All generation complete. Docker verification in progress.
 | Direct(Qwen2.5-7B) | 500 gen | 89 gen, 19/89 verified |
 | Direct(GPT-5.4) | 500 gen, 500 verified | 89 gen, 25/89 verified |
 | Oracle-Codex | 500 gen, 500 verified | 89 gen, 16/89 verified |
-| Oracle-Strongest | 500 gen, 500 verified | 89 gen, 27/89 verified |
+| router+claude | 500 gen, 500 verified | 89 gen, 27/89 verified |
 | Oracle-Cheapest | 500 gen, 500 verified | 89 gen, 29/89 verified |
 | Random | 500 gen, 500 verified | 89 gen, 29/89 verified |
 

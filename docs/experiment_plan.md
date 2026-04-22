@@ -166,7 +166,7 @@ eval_pipeline/
 | Direct(GPT-5.4) | No routing | Strongest single model | Upper bound |
 | Router-R1 | Learned routing, no decomp | 3B pre-trained | Model-only routing |
 | Oracle-Codex | Fixed -> code specialist | GPT-5.3-Codex | Is specialist always best? |
-| Oracle-Strongest | Fixed -> strongest | Claude-Opus-4.6 | Cost upper bound |
+| router+claude | Claude-Opus-4.6 worker pool | Claude-Opus-4.6 | Cost upper bound |
 | Oracle-Cheapest | Fixed -> cheapest | Claude-Haiku-4.5 | Quality lower bound |
 | Random | Random model selection | Random from pool | Learned beats random? |
 | WideSeek-R1 | MARL decomposition | Homogeneous agents | MARL baseline |
@@ -242,7 +242,7 @@ Each ablation changes ONE variable, all else fixed.
 | Direct(Qwen2.5-7B) | No routing | -- | -- | -- |
 | Direct(GPT-5.4) | No routing | -- | -- | -- |
 | Oracle-Cheapest | Fixed (haiku) | -- | -- | -- |
-| Oracle-Strongest | Fixed (opus) | -- | -- | -- |
+| router+claude | Claude-Opus worker pool | -- | -- | -- |
 | Oracle-Codex | Fixed (codex) | -- | -- | -- |
 | Random | Random | -- | -- | -- |
 | Router-R1 | Learned (no decomp) | -- | -- | -- |

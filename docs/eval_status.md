@@ -119,7 +119,7 @@ This matches the eval protocol in experiment_plan_v3.md §5.3.
 | Direct(Qwen2.5-7B) | No routing | — | — | — |
 | Direct(GPT-5.4) | No routing | — | — | $0.019 |
 | Oracle-Cheapest | Fixed (haiku) | — | — | ~$0.00 |
-| Oracle-Strongest | Fixed (opus) | — | — | $0.063 |
+| router+claude | Claude-Opus worker pool | — | — | $0.063 |
 | Random | Random | — | — | — |
 | Router-R1 | Learned (no decomp) | — | — | ~$0.015 |
 | **SkillRouter-SFT** | **Learned + decomp** | — | — | — |
@@ -143,7 +143,7 @@ Accuracy ↑
     │   ● SkillRouter-SFT
     │  ● Router-R1
     │ ● GPT-5.4 direct
-    │● Oracle-Strongest (expensive)
+    │● router+claude (expensive)
     │
     │         ● Random
     │              ● Oracle-Cheapest (cheap but weak)
