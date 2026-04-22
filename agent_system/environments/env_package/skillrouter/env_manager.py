@@ -1,14 +1,7 @@
-"""
-SkillRouter Environment Manager for verl-agent.
-Wraps SkillRouterMultiProcessEnv with the verl-agent interface.
-"""
-
 import os
 from typing import List, Tuple, Dict, Any
 import numpy as np
 from agent_system.environments.base import EnvironmentManagerBase, to_numpy
-
-# Load system prompt once
 _SYSTEM_PROMPT_PATH = os.environ.get(
     "SKILLROUTER_SYSTEM_PROMPT",
     "/home/xieht/data/sft/system_prompt.txt"
@@ -38,12 +31,7 @@ Continue the trajectory. Generate <verify> and either <final_answer> or a repair
 
 
 class SkillRouterEnvironmentManager(EnvironmentManagerBase):
-    """
-    EnvironmentManager for SkillRouter.
-
-    The system prompt + question + history are all embedded in the obs text,
-    because verl-agent passes obs_text directly as the user message content.
-    """
+  
 
     def __init__(self, envs, projection_f, config):
         super().__init__(envs, projection_f, config)

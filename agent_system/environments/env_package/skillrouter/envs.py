@@ -1,20 +1,3 @@
-"""
-SkillRouter Environment for verl-agent.
-
-Each episode:
-1. Model receives a question
-2. Model generates <plan> + <route> tags (assistant turn)
-3. Environment parses routes, calls real LLM API as sub-agent, returns <obs>
-4. Model generates <verify> + optionally <final_answer> or repair <plan>
-5. Repeat until <final_answer> or max_steps
-
-Reward: Router-R1 style R = (1-α)*R_outcome + α*R_cost
-
-Sub-agent: real API calls to qwen-plus via DashScope.
-Every route gets a real LLM response regardless of skill choice.
-The model must learn which (model, skill) combination actually works.
-"""
-
 import re
 import string
 import concurrent.futures
@@ -30,14 +13,10 @@ try:
     import openai
 except ImportError:
     openai = None
-
-# Load model pool from configs/pools.yaml (single source of truth)
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "../../../../..")))
 from configs import load_pools as _load_pools
 
 _pools = _load_pools()
-
-# --- Schema v1.1 Parsers ---
 PLAN_RE = re.compile(r'<plan round="(\d+)">(.*?)</plan>', re.DOTALL)
 SUBTASK_RE = re.compile(r'<subtask id="(\d+)" depends_on="([^"]*)">(.*?)</subtask>', re.DOTALL)
 ROUTE_RE = re.compile(
@@ -46,18 +25,15 @@ ROUTE_RE = re.compile(
 )
 FINAL_RE = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
 
-# Valid pools — from pools.yaml
 VALID_MODELS = set(_pools["models"])
 VALID_SKILLS = set(_pools["skills"])
 
-# Per-token cost (USD per 1M output tokens) — from pools.yaml
 MODEL_COST_PER_M_TOKENS = _pools["cost_per_m"]
 DEFAULT_ALPHA = 0.1
-COST_WINDOW_SIZE = 1000  # rolling window for percentile normalization
+COST_WINDOW_SIZE = 1000  
 COST_PERCENTILE_LO = 5
 COST_PERCENTILE_HI = 95
 
-# Skill → system prompt for sub-agent
 SKILL_PROMPTS = {
     "direct_answer": "Answer the following question directly and concisely.",
     "reason": "Reason step by step about the following question, then give a final answer.",
@@ -75,21 +51,16 @@ SKILL_PROMPTS = {
 }
 
 
-# Map router's model pool → (DashScope model, max_tokens)
-# Different tiers get different models AND token budgets
 ROUTER_TO_DASHSCOPE = {
-    # nano tier → qwen-plus with low token budget (simulates weaker model)
+   
     "claude-haiku-4-5-20251001": ("qwen-plus", 64),
     "gemini-2.5-flash": ("qwen-plus", 64),
-    # mid tier → qwen-plus with normal budget
     "kimi-k2.5": ("qwen-plus", 256),
     "claude-sonnet-4-6": ("qwen-plus", 256),
     "gemini-3.1-pro-preview": ("qwen-plus", 256),
     "qwen3.6-plus": ("qwen-plus", 256),
-    # large tier → qwen-max (strongest)
     "claude-opus-4-6": ("qwen-max", 512),
     "gpt-5.4": ("qwen-max", 512),
-    # code specialist → qwen-plus with code prompt
     "gpt-5.3-codex": ("qwen-plus", 512),
 }
 
@@ -344,10 +315,10 @@ class SkillRouterMultiProcessEnv(gym.Env):
                     else:
                         norm_cost = 0.5
                 else:
-                    # Not enough data yet — use uniform prior
+                  
                     norm_cost = 0.5
 
-                r_cost = 1.0 - norm_cost  # lower cost → higher reward
+                r_cost = 1.0 - norm_cost  
                 rewards[i] = (1 - self.alpha) * correctness + self.alpha * r_cost
 
             dones[i] = result["done"]

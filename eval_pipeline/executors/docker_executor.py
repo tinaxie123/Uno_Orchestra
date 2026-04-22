@@ -260,9 +260,22 @@ class DockerExecutor(BaseExecutor):
         # Use provided timeout or default
         exec_timeout = timeout if timeout is not None else self.docker_timeout
 
+        # Wrap command with proxy env vars so curl/wget/pip/apt all use proxy
+        proxy_host = "172.17.0.1"
+        proxy_http = f"http://{proxy_host}:7890"
+        proxy_socks = f"socks5://{proxy_host}:7890"
+        wrapped = (
+            f"export http_proxy={proxy_http} https_proxy={proxy_http} "
+            f"all_proxy={proxy_socks} "
+            f"HTTP_PROXY={proxy_http} HTTPS_PROXY={proxy_http} "
+            f"ALL_PROXY={proxy_socks} "
+            f"no_proxy=localhost,127.0.0.1; "
+            f"{command}"
+        )
+
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", self.container_id, "sh", "-c", command,
+                "docker", "exec", self.container_id, "sh", "-c", wrapped,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -323,9 +336,21 @@ class DockerExecutor(BaseExecutor):
                         timeout=30,
                     )
 
-            # Execute test script
+            # Inject proxy into container before running test.sh
+            # This ensures curl/wget/pip/apt all use the proxy, even in subshells
+            proxy_host = "172.17.0.1"
+            proxy_http = f"http://{proxy_host}:7890"
+            proxy_socks = f"socks5://{proxy_host}:7890"
+            proxy_setup = (
+                f'export http_proxy={proxy_http} https_proxy={proxy_http} '
+                f'all_proxy={proxy_socks} '
+                f'HTTP_PROXY={proxy_http} HTTPS_PROXY={proxy_http} '
+                f'ALL_PROXY={proxy_socks} '
+                f'no_proxy=localhost,127.0.0.1; '
+                f'bash /tmp/test.sh'
+            )
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", self.container_id, "bash", "/tmp/test.sh",
+                "docker", "exec", self.container_id, "bash", "-c", proxy_setup,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

@@ -34,14 +34,6 @@ models:
       Flash-line latency. Configurable thinking levels. Best mid-tier all-rounder.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
 
-  - id: claude-haiku-4-5-20251001
-    usd_per_1m_input: 1.00
-    usd_per_1m_output: 4.00
-    description: >
-      Anthropic's fastest model. 200K context. Strong at classification,
-      extraction, simple Q&A. Best for high-volume cost-sensitive tasks.
-    allowed_skills: [direct_answer, web_search, read_document, extract_field, fact_check]
-
   - id: gemini-3.1-pro-preview
     usd_per_1m_input: 2.50
     usd_per_1m_output: 12.00
@@ -116,6 +108,6 @@ pool_ablations:
   minimal:
     include: [gemini-2.5-flash, gemini-3-flash-preview, gpt-5.4]
   mid_only:
-    include: [gemini-3-flash-preview, gpt-5.3-codex, claude-haiku-4-5-20251001]
+    include: [gemini-3-flash-preview, gpt-5.3-codex, gemini-3.1-pro-preview]
   pro_only:
     include: [gemini-3.1-pro-preview, gpt-5.3-codex, gpt-5.4, claude-sonnet-4-6]

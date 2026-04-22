@@ -34,6 +34,18 @@ def _get_agent_prompt(bench_name: str) -> str:
 
 def build_router(name: str, args) -> BaseRouter:
     kw = dict(api_base=args.api_base, api_key=args.api_key)
+    if name == "planner":
+        from .routers.planner_router import PlannerRouter
+        return PlannerRouter(
+            planner_model=args.local_model or "Qwen/Qwen2.5-7B-Instruct",
+            router_model=getattr(args, 'router_model', None) or args.local_model or "Qwen/Qwen2.5-7B-Instruct",
+            planner_api_base=args.local_base,
+            router_api_base=args.local_base,
+            sub_model_api_base=args.api_base,
+            planner_api_key="EMPTY",
+            router_api_key="EMPTY",
+            sub_model_api_key=args.api_key,
+        )
     if name == "local":
         return LocalRouter(
             local_base=args.local_base,
@@ -53,6 +65,13 @@ def build_router(name: str, args) -> BaseRouter:
         return ROUTER_REGISTRY[name](**kw)
     if name == "random":
         return ROUTER_REGISTRY["random"](**kw)
+    if name == "skill-sft":
+        from .routers.router_sft import SkillRouterSFT
+        return SkillRouterSFT(
+            local_base=args.local_base,
+            model_name=args.local_model or "SkillRouter-SFT",
+            **kw,
+        )
     raise ValueError(f"Unknown router: {name}")
 
 def build_bench(name: str, args) -> BaseBenchmark:
@@ -60,8 +79,10 @@ def build_bench(name: str, args) -> BaseBenchmark:
         return BENCH_REGISTRY["swebench"](eval_workers=args.verify_workers)
     elif name == "terminalbench":
         return BENCH_REGISTRY["terminalbench"]()
+    elif name in BENCH_REGISTRY:
+        return BENCH_REGISTRY[name]()
     else:
-        raise ValueError(f"Unknown benchmark: {name}")
+        raise ValueError(f"Unknown benchmark: {name}. Available: {list(BENCH_REGISTRY)}")
 
 
 
@@ -220,28 +241,44 @@ def _run_interactive(router, bench, tasks, need_verify,
 def _run_pipeline_eval(bench, tasks, need_verify,
                        predictions, verification, pred_file, verify_file,
                        logs_dir, args):
-    """Pipeline mode: planner → router → sub-agent → Docker verify."""
+    """Pipeline mode: planner → router → sub-agent → Docker verify.
+    Supports pass@k: run up to k attempts per task, pass if any succeeds."""
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from configs import load_pools
 
     pools = load_pools()
+    pass_k = getattr(args, 'pass_k', 1)
     to_run = [t for t in tasks if t.task_id not in verification]
     if not to_run:
         print("Pipeline: all tasks already verified")
         return
 
-    print(f"Pipeline mode: {len(to_run)} tasks (workers={args.verify_workers})")
+    print(f"Pipeline mode: {len(to_run)} tasks, pass@{pass_k} (workers={args.verify_workers})")
+
+    def _run_one_task(task):
+        """Run up to pass_k attempts for a single task."""
+        rewards = []
+        last_vr = None
+        for attempt in range(pass_k):
+            attempt_logs = os.path.join(logs_dir, f"attempt_{attempt}") if pass_k > 1 else logs_dir
+            vr = bench.pipeline_verify(task, args, pools, attempt_logs)
+            rewards.append(vr.reward)
+            last_vr = vr
+            if vr.reward > 0:
+                break  # early stop on first success
+        best_reward = max(rewards)
+        return task, best_reward, rewards, last_vr
 
     lock = threading.Lock()
     with open(verify_file, "a") as vout, open(pred_file, "a") as pout:
         with ThreadPoolExecutor(max_workers=args.verify_workers) as ex:
-            futs = {ex.submit(bench.pipeline_verify, t, args, pools, logs_dir): t
-                    for t in to_run}
+            futs = {ex.submit(_run_one_task, t): t for t in to_run}
             for fut in tqdm(as_completed(futs), total=len(to_run), desc="Pipeline"):
-                task = futs[fut]
-                vr = fut.result()
-                d = {"task_id": vr.task_id, "reward": vr.reward,
+                task, best_reward, rewards, last_vr = fut.result()
+                vr = last_vr
+                d = {"task_id": vr.task_id, "reward": best_reward,
+                     "pass_at_k": rewards,
                      "error": vr.error, "log": vr.log[:500]}
                 pred_entry = {"task_id": vr.task_id, "answer": "(pipeline)",
                               "route_count": 0, "routed_models": [], "cost": 0}
@@ -398,12 +435,15 @@ def _gen_one(router, bench, task):
 def main():
     parser = argparse.ArgumentParser(description="Eval pipeline: router → sub-agent → benchmark")
     parser.add_argument("--router", required=True, choices=list(ROUTER_REGISTRY))
-    parser.add_argument("--bench", required=True, choices=list(BENCH_REGISTRY))
+    parser.add_argument("--bench", required=True, choices=list(BENCH_REGISTRY),
+                        help="Benchmark to evaluate. Use comma-separated for multiple: gpqa,mmlu,math500")
     parser.add_argument("--api_key", required=True)
     parser.add_argument("--api_base", default=DEFAULT_API_BASE)
     parser.add_argument("--local_base", default=DEFAULT_LOCAL_BASE)
     parser.add_argument("--local_model", default=None)
     parser.add_argument("--direct_model", default=None)
+    parser.add_argument("--router_model", default=None,
+                        help="Router model (for planner mode, if different from planner)")
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--max_tasks", type=int, default=None)
     parser.add_argument("--gen_workers", type=int, default=16)
@@ -413,6 +453,14 @@ def main():
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--pipeline", action="store_true", help="Pipeline mode: planner→router→sub-agent→Docker")
     parser.add_argument("--pass-k", type=int, default=1, help="pass@k: run up to k attempts per task")
+    parser.add_argument("--worker_mode",
+                        choices=["backbone", "random", "learned", "strongest"],
+                        default="learned",
+                        help="How each subtask's sub-agent model is chosen. "
+                             "backbone=local LLM, random=uniform(pool), "
+                             "learned=router LLM decides, strongest=fixed --strongest_model")
+    parser.add_argument("--strongest_model", default="claude-opus-4-6",
+                        help="Model id used when --worker_mode=strongest")
     args = parser.parse_args()
     args.pass_k = args.pass_k  # ensure accessible
 
