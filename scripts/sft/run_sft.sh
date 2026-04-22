@@ -20,11 +20,13 @@
 set -e
 
 LLAMA_FACTORY_DIR="${LLAMA_FACTORY_DIR:-/home/xieht/data/LlamaFactory}"
-CONFIG="configs/sft/router_sft_qwen25_7b.yaml"
+CONFIG_REL="${CONFIG_REL:-configs/sft/sft_qwen25_7b.yaml}"
+REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+CONFIG_ABS="$REPO_DIR/$CONFIG_REL"
 
 cd "$LLAMA_FACTORY_DIR"
 
 FORCE_TORCHRUN=1 \
 WANDB_PROJECT=router-sft \
 WANDB_ENTITY=multiagent_router \
-llamafactory-cli train "$(dirname "$0")/../../$CONFIG"
+llamafactory-cli train "$CONFIG_ABS"
