@@ -1,0 +1,121 @@
+[Step 1] git status
+Exit: 0
+On branch master
+nothing to commit, working tree clean
+
+------------------------------------------------------------
+[Step 2] git branch --all --verbose
+Exit: 0
+* master d7d3e4b off the job market woo
+
+------------------------------------------------------------
+[Step 3] git log --oneline --decorate --graph --all --max-count=20
+Exit: 0
+* d7d3e4b (HEAD -> master) off the job market woo
+* c4e38a1 Add code link for BLADE
+* 6f46fa0 CV Update
+* dd7e395 Adds BLADE to bib
+* 2cd355a n+1 (for the last time???)
+* 8eaf505 Add BLADE
+* cc2ec78 Underline
+* d71094e Underline Conferences
+* 232b279 Remove posters
+* 3fdf5f5 Add NeurIPS
+* 8c4731d Add EMNLP acceptance
+* f54f66b Add GR link
+* 18d2430 Add other links
+* 1dd055e Ignore Gemfile, etc
+* 5c77a6d Dont overwrite
+* c7d2f95 Delete unsused files
+* 20b05d9 Remove more unused files
+* 2d144f7 Add yamls for new papers
+* 7882f2d Don't track _site
+* cd2b8de Add new papers
+
+------------------------------------------------------------
+[Step 4] git reflog --date=iso --all --max-count=50
+Exit: 0
+d7d3e4b HEAD@{2025-09-13 17:54:33 +0000}: checkout: moving from 650dba427e0a9dcd118f41a4c5e35c8017550a5a to master
+650dba4 HEAD@{2025-09-13 17:54:33 +0000}: commit: Move to Stanford
+c4e38a1 HEAD@{2025-09-13 17:54:33 +0000}: checkout: moving from master to HEAD~1
+d7d3e4b refs/heads/master@{2025-09-13 17:54:32 +0000}: reset: moving to d7d3e4b
+b0d59cd refs/heads/master@{2025-09-13 17:54:32 +0000}: clone: from https://github.com/TheMikeMerrill/personal-site.git
+d7d3e4b HEAD@{2025-09-13 17:54:32 +0000}: reset: moving to d7d3e4b
+b0d59cd HEAD@{2025-09-13 17:54:32 +0000}: clone: from https://github.com/TheMikeMerrill/personal-site.git
+
+------------------------------------------------------------
+[Step 5] git show --stat --summary 650dba4 && git branch -a --contains 650dba4 || true
+Exit: 0
+commit 650dba427e0a9dcd118f41a4c5e35c8017550a5a
+Author: Test User <test@example.com>
+Date:   Sat Sep 13 17:54:33 2025 +0000
+
+    Move to Stanford
+
+ _includes/about.md    |  4 ++--
+ _layouts/default.html | 32 +++++++++++++++++---------------
+ 2 files changed, 19 insertions(+), 17 deletions(-)
+
+------------------------------------------------------------
+[Step 6] git branch recover-changes 650dba4
+Exit: 0
+
+------------------------------------------------------------
+[Step 7] git branch recover-changes 650dba4 && git checkout master && git merge recover-changes && git push origin master
+Exit: 128
+fatal: a branch named 'recover-changes' already exists
+
+------------------------------------------------------------
+[Step 8] git checkout master && git merge 650dba4 && git push origin master
+Exit: 1
+Already on 'master'
+Auto-merging _includes/about.md
+CONFLICT (content): Merge conflict in _includes/about.md
+Automatic merge failed; fix conflicts and then commit the result.
+
+------------------------------------------------------------
+[Step 9] git status --short && git diff --merge -- _includes/about.md
+Exit: 0
+UU _includes/about.md
+M  _layouts/default.html
+diff --cc _includes/about.md
+index 7561d9e,5322c14..ebf11b4
+--- a/_includes/about.md
++++ b/_includes/about.md
+@@@ -1,3 -1,3 +1,3 @@@
+- I am a Postdoctoral Researcher at Stanford CS.
+ -I am a sixth year PhD student at the [Paul G. Allen School of Computer Science & Engineering](https://www.cs.washington.edu/) at The University of Washington, where I am advised by [Tim Althoff](http://www.timalthoff.com/). I am affiliated with [UW NLP](https://twitter.com/uwnlp).
+++I am a sixth PhD candidate at the [Paul G. Allen School of Computer Science & Engineering](https://www.cs.washington.edu/) at The University of Washington, where I am advised by [Tim Althoff](http://www.timalthoff.com/). I am affiliated with [UW NLP](https://twitter.com/uwnlp).
+  
+- Previously, I was a Student Researcher at [Google Research](https://research.google/), an ML Research Intern at [Apple Health AI](https://machinelearning.apple.com/work-with-us) and a data scientist and the second full-time employee at [HealthRhythms](https://www.healthrhythms.com). 
+ -**I am looking for a full time job!** If you think we would be a good match, please reach out. Previously, I was a Student Researcher at [Google Research](https://research.google/), an ML Research Intern at [Apple Health AI](https://machinelearning.apple.com/work-with-us) and a data scientist and the second full-time employee at [HealthRhythms](https://www.healthrhythms.com). 
+++ Previously, I was a Student Researcher at [Google Research](https://research.google/), an ML Research Intern at [Apple Health AI](https://machinelearning.apple.com/work-with-us) and a data scientist and the second full-time employee at [HealthRhythms](https://www.healthrhythms.com). 
+
+------------------------------------------------------------
+[Step 10] python - <<'PY'
+from pathlib import Path
+p = Path('_includes/about.md')
+text = p.read_text()
+text = text.replace('I am a Postdoctoral Researcher at Stanford CS.\n', 'I am a sixth PhD candidate at the [Paul G. Allen School of Computer Science & Engineering](https://www.cs.washington.edu/) at The University of Washington, where I am advised by [Tim Althoff](http://www.timalthoff.com/). I am affiliated with [UW NLP](https://twitter.com/uwnlp).\n')
+text = text.replace('I am a sixth year PhD student at the [Paul G. Allen School of Computer Science & Engineering](https://www.cs.washington.edu/) at The University of Washington, where I am advised by [Tim Althoff](http://www.timalthoff.com/). I am affiliated with [UW NLP](https://twitter.com/uwnlp).\n', 'I am a sixth PhD candidate at the [Paul G. Allen School of Computer Science & Engineering](https://www.cs.washington.edu/) at The University of Washington, where I am advised by [Tim Althoff](http://www.timalthoff.com/). I am affiliated with [UW NLP](https://twitter.com/uwnlp).\n')
+text = text.replace('**I am looking for a full time job!** If you think we would be a good match, please reach out. Previously, I was a Student Researcher at [Google Research](https://research.google/), an ML Research Intern at [Apple Health AI](https://machinelearning.apple.com/work-with-us) and a data scientist and the second full-time employee at [HealthRhythms](https://www.healthrhythms.com). \n', 'Previously, I was a Student Researcher at [Google Research](https://research.google/), an ML Research Intern at [Apple Health AI](https://machinelearning.apple.com/work-with-us) and a data scientist and the second full-time employee at [HealthRhythms](https://www.healthrhythms.com). \n')
+p.write_text(text)
+PY
+
+git add _includes/about.md _layouts/default.html && git commit -m "Merge recovered Stanford changes" && git push origin master
+Exit: 128
+[master 3255abe] Merge recovered Stanford changes
+fatal: 'origin' does not appear to be a git repository
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+
+------------------------------------------------------------
+[Step 11] git remote -v && git status --short && git log --oneline --decorate -n 3
+Exit: 0
+3255abe (HEAD -> master) Merge recovered Stanford changes
+650dba4 (recover-changes) Move to Stanford
+d7d3e4b off the job market woo
+
+------------------------------------------------------------
