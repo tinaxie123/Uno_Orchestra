@@ -265,6 +265,209 @@ class TerminalBench(BaseBenchmark):
 
     # ----- main interactive pipeline -----------------------------------
 
+    # ------------------------------------------------------------------
+    # Hierarchical two-step pipeline: Planner → Router → Worker, matching
+    # the SFT training schema (plan_subtask + finish / route(model, skill)).
+    # ------------------------------------------------------------------
+
+    def run_hierarchical(
+        self,
+        task: Task,
+        planner_model: str,
+        planner_api_base: str,
+        planner_api_key: str,
+        router_model: str,
+        router_api_base: str,
+        router_api_key: str,
+        pools,
+        sub_model_api_base: str,
+        sub_model_api_key: str,
+        logs_dir: Optional[str] = None,
+        random_worker: bool = False,
+    ) -> VerifyResult:
+        """Two-step schema: Planner loops with [plan_subtask, finish]; each
+        plan_subtask invokes the Router (which picks (model, skill)) and then a
+        worker. Shell/Python skills run in Docker via SubAgent; other skills
+        are single-shot API calls. When the Planner calls finish(answer) we
+        run ``test.sh`` to decide the reward.
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self._run_hierarchical_async(
+                    task=task,
+                    planner_model=planner_model,
+                    planner_api_base=planner_api_base,
+                    planner_api_key=planner_api_key,
+                    router_model=router_model,
+                    router_api_base=router_api_base,
+                    router_api_key=router_api_key,
+                    pools=pools,
+                    sub_model_api_base=sub_model_api_base,
+                    sub_model_api_key=sub_model_api_key,
+                    logs_dir=logs_dir,
+                    random_worker=random_worker,
+                )
+            )
+        finally:
+            loop.close()
+
+    async def _run_hierarchical_async(
+        self,
+        task: Task,
+        planner_model: str,
+        planner_api_base: str,
+        planner_api_key: str,
+        router_model: str,
+        router_api_base: str,
+        router_api_key: str,
+        pools,
+        sub_model_api_base: str,
+        sub_model_api_key: str,
+        logs_dir: Optional[str],
+        random_worker: bool,
+    ) -> VerifyResult:
+        import random as _random
+        from openai import AsyncOpenAI
+        from ..executors import DockerExecutor
+        # Import lazily so the module is usable without LangChain installed.
+        from scripts.data.planner import arun_planner
+        from scripts.data.router import aroute_subtask
+        from agent_system.agents.subagent import SubAgent
+
+        cfg = task.raw.get("config", {})
+        task_dir = Path(task.raw.get("task_dir", ""))
+        if not cfg or not task_dir:
+            return VerifyResult(task.task_id, 0.0, error="missing config/task_dir")
+
+        base = Path(logs_dir or "/tmp/tb_runs_hier") / task.task_id
+        verifier_logs = base / "verifier"
+        agent_logs = base / "agent"
+        verifier_logs.mkdir(parents=True, exist_ok=True)
+        agent_logs.mkdir(parents=True, exist_ok=True)
+
+        executor = DockerExecutor(
+            task_id=task.task_id,
+            task_dir=task_dir,
+            task_config=cfg,
+            verifier_logs_dir=verifier_logs,
+            agent_logs_dir=agent_logs,
+            docker_manager=self._get_docker_manager(),
+            docker_timeout=self.docker_timeout,
+        )
+
+        sub_client = AsyncOpenAI(base_url=sub_model_api_base, api_key=sub_model_api_key, timeout=90)
+        subagent = SubAgent(
+            api_base=sub_model_api_base,
+            api_key=sub_model_api_key,
+            max_steps=self.subagent_max_steps,
+            cmd_timeout=self.subagent_cmd_timeout,
+        )
+
+        SHELL_SKILLS = {"execute_shell", "execute_python", "execute_bash"}
+        routing_decisions: List[Dict[str, Any]] = []
+        rng = _random.Random(0)
+
+        async def execute_subtask(instruction: str, task_id: str) -> str:
+            selected_model, selected_skill = await aroute_subtask(
+                instruction=instruction,
+                model=router_model, api_base=router_api_base, api_key=router_api_key,
+                pools=pools, temperature=0.3,
+            )
+            if random_worker and pools.get("models"):
+                selected_model = rng.choice(pools["models"])
+                allowed = pools.get("model_skills", {}).get(selected_model) or pools.get("skills", [])
+                if allowed:
+                    selected_skill = rng.choice(allowed)
+            routing_decisions.append({
+                "task_id": task_id, "instruction": instruction[:400],
+                "routed_model": selected_model, "routed_skill": selected_skill,
+            })
+
+            if selected_skill in SHELL_SKILLS:
+                try:
+                    result = await subagent.run(
+                        model=selected_model,
+                        task_instruction=instruction,
+                        original_question=task.question,
+                        executor=executor,
+                        agent_logs_dir=agent_logs,
+                    )
+                except Exception as e:
+                    return f"[routed to {selected_model} / {selected_skill}]\nSubAgent crashed: {e}"
+                return SubAgent.format_result_for_planner({**result, "model": selected_model})
+            # Non-shell skill: single API call
+            try:
+                resp = await sub_client.chat.completions.create(
+                    model=selected_model,
+                    messages=[{"role": "user", "content": instruction}],
+                    temperature=0.1, max_tokens=1024,
+                )
+                txt = (resp.choices[0].message.content or "").strip()
+                return f"[routed to {selected_model} / {selected_skill}]\n{txt}"
+            except Exception as e:
+                return f"[routed to {selected_model} / {selected_skill}]\nWorker error: {e}"
+
+        reward = 0.0
+        planner_answer: Optional[str] = None
+        last_error: Optional[str] = None
+        planner_result: Dict[str, Any] = {}
+        try:
+            await executor.start_container()
+            planner_result = await arun_planner(
+                question=task.question,
+                model=planner_model,
+                api_base=planner_api_base,
+                api_key=planner_api_key,
+                execute_subtask_fn=execute_subtask,
+                temperature=0.7,
+            )
+            planner_answer = planner_result.get("answer")
+            try:
+                reward = float(await executor.run_tests() or 0.0)
+            except Exception as e:
+                last_error = f"run_tests failed: {e}"
+                reward = 0.0
+        except Exception as e:
+            last_error = f"pipeline exception: {e}"
+            logger.exception("[%s] hierarchical pipeline failed", task.task_id)
+        finally:
+            try:
+                await executor.cleanup()
+            except Exception as e:
+                logger.warning("[%s] cleanup failed: %s", task.task_id, e)
+
+        # Save trajectory
+        try:
+            with (base / "trajectory.json").open("w") as f:
+                json.dump({
+                    "task_id": task.task_id,
+                    "mode": "hierarchical",
+                    "planner_model": planner_model,
+                    "router_model": router_model,
+                    "random_worker": random_worker,
+                    "reward": reward,
+                    "planner_answer": planner_answer,
+                    "last_error": last_error,
+                    "subtasks": planner_result.get("subtasks", []),
+                    "routing_decisions": routing_decisions,
+                }, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        return VerifyResult(
+            task.task_id, reward,
+            error=last_error,
+            log=json.dumps({
+                "subtasks": len(routing_decisions),
+                "answer": (planner_answer or "")[:300],
+            })[:3000],
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy: single-tool-call delegate pipeline kept for reference.
+    # ------------------------------------------------------------------
+
     def run_interactive(
         self,
         task: Task,
