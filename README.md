@@ -85,9 +85,9 @@ dalegation
 
 ## Error Taxonomy
 
-Base router 
+Base router
 
-
+The Qwen2.5-7B router solves 43.7% of the 12,803 sampled tasks under pass@3; the remaining 7,214 tasks yield 21,642 failing rollouts that we classify by root cause. Success varies sharply across capability axes (atomic reasoning 96.6%, compositional 66.4%, knowledge retrieval 64.8%, knowledge composition 42.3%, tool orchestration 14.3%). Roughly three-quarters of failures are content errors and the remaining quarter are protocol errors, all observed under the same source-aware planner prompt the teacher uses (so the failures reflect capability gaps, not prompting choices). The content failures concentrate on three delegation patterns: *output-not-code* on competitive programming (34.2% of all failures — TACO), where the router answers in prose despite having a code-generation specialist in its pool; *wrong-entity* errors on multi-hop QA (22.6% — HotpotQA/MuSiQue), where the router cannot maintain coherent reasoning chains across hops; and *natural-language instead of tool call* on ToolACE (2.1%), where the router produces an English description instead of emitting the call even though the tool schema is present in its context. Protocol failures are heavily skewed toward tool use: >80% of ToolACE failures either never issue a tool call (26%) or never reach a `finish()` within the step budget (59%). SFT is designed to close the protocol gap by imitating teacher trajectories; RL on the 4,549-task residual pool then optimizes the content-level routing decisions that remain after the shape is fixed.
 
 ## Model comparison
 
