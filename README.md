@@ -2,7 +2,7 @@
 
 Hierarchical-delegation router that decomposes a task into subtasks and routes each to a `(worker model, skill)` pair, trained with SFT + cost-aware RL.
 
-# 🎆Configure Your Own LLM skillrouter
+## 🎆Configure Your Own LLM skillrouter
 
 ### 🍬Data Source Pool Construction
 
