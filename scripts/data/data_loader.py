@@ -102,6 +102,10 @@ def _extract_qa(name: str, row: dict) -> tuple[str, str]:
         convs = row.get("conversations", [])
         q = next((c.get("value", "") for c in convs if c.get("from") == "user"), "")
         gold = next((c.get("value", "") for c in convs if c.get("from") == "assistant"), "")
+        # Include the system prompt with tool definitions in the question
+        system = row.get("system", "")
+        if system:
+            q = system.strip() + "\n\n---\nUser query: " + q
         return q, gold
 
     return row.get("question", ""), row.get("answer", "")

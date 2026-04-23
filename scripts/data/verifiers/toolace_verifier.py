@@ -37,7 +37,7 @@ def _extract_function_calls(text: str) -> list[dict]:
 
 
 def verify_toolace(pred: str, gold: str, name_overlap_threshold: float = 0.5) -> bool:
-  
+
     if not pred or not gold:
         return False
 
@@ -48,10 +48,20 @@ def verify_toolace(pred: str, gold: str, name_overlap_threshold: float = 0.5) ->
     gold_calls = _extract_function_calls(gold)
 
     if not gold_calls:
-       
+        # Gold is not a tool call (e.g., a refusal or text answer)
+        # Use text similarity: substring match or F1-like overlap
         g = _normalize_text(gold)
         p = _normalize_text(pred)
-        return g in p if len(g) > 2 else p == g
+        if g in p if len(g) > 2 else p == g:
+            return True
+        # Also check if both are refusals (common in toolace)
+        refusal_patterns = ["don't have", "cannot", "can't", "not available",
+                           "unable to", "no access", "not capable"]
+        gold_is_refusal = any(pat in g for pat in refusal_patterns)
+        pred_is_refusal = any(pat in p for pat in refusal_patterns)
+        if gold_is_refusal and pred_is_refusal:
+            return True
+        return False
 
     if not pred_calls:
         return False

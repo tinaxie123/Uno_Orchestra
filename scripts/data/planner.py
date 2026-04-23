@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 MAX_STEPS = 8
 PLANNER_MAX_TOKENS = 2048
+_MAX_IDENTICAL_CALLS = 3  # Break after N identical consecutive subtask calls
 
 
 # ---------------------------------------------------------------------------
@@ -182,8 +183,10 @@ def _parse_text_tool_call(text: str) -> list[dict] | None:
 
 def _try_parse_json_tool(raw: str) -> list[dict] | None:
     """Try to parse a JSON string as a tool call dict."""
-    fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
-    for candidate in [raw, fixed]:
+    # Fix common issues: unescaped backslashes, raw newlines in strings
+    fixed_backslash = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
+
+    for candidate in [raw, fixed_backslash]:
         try:
             obj = json.loads(candidate)
             name = obj.get("name", "")
@@ -197,12 +200,46 @@ def _try_parse_json_tool(raw: str) -> list[dict] | None:
                 return [{"name": name, "args": args, "id": "text_fallback"}]
         except json.JSONDecodeError:
             continue
+
+    # Fallback: regex extraction when JSON is malformed (e.g. contains raw
+    # newlines, triple-quotes from code blocks, etc.)
+    name_m = re.search(r'"name"\s*:\s*"(finish|plan_subtask)"', raw)
+    if name_m:
+        name = name_m.group(1)
+        if name == "finish":
+            ans_m = re.search(r'"answer"\s*:\s*"([^"]*)"', raw)
+            return [{"name": "finish",
+                      "args": {"answer": ans_m.group(1) if ans_m else ""},
+                      "id": "text_fallback"}]
+        if name == "plan_subtask":
+            # Extract instruction: grab everything between "instruction": " and the next ", "task_id"
+            instr_m = re.search(
+                r'"instruction"\s*:\s*"(.*?)(?:"\s*,\s*"task_id"|"\s*\})',
+                raw, re.DOTALL,
+            )
+            tid_m = re.search(r'"task_id"\s*:\s*"(\w+)"', raw)
+            instruction = instr_m.group(1) if instr_m else raw[name_m.end():][:500]
+            # Unescape basic sequences
+            instruction = instruction.replace('\\n', '\n').replace('\\t', '\t')
+            return [{"name": "plan_subtask",
+                      "args": {"instruction": instruction,
+                               "task_id": tid_m.group(1) if tid_m else "t1"},
+                      "id": "text_fallback"}]
+
     return None
 
 
 _NUDGE = HumanMessage(
-    content="Now call finish(answer) with the final value, "
-            "or plan_subtask() to continue.",
+    content="You MUST take an action now. Either:\n"
+            "- Call plan_subtask(instruction, task_id) to delegate work, OR\n"
+            "- Call finish(answer) with the final answer.\n"
+            "Do NOT respond with empty text.",
+)
+
+_ERROR_NUDGE = HumanMessage(
+    content="The previous sub-task returned an error. Do NOT repeat the same call. "
+            "Either: (1) try a different approach, (2) solve it yourself, or "
+            "(3) call finish(answer) with your best answer.",
 )
 
 # How many consecutive empty responses before we switch to no-tools fallback
@@ -213,7 +250,6 @@ _FREEFORM_PROMPT = HumanMessage(
             "At the end, write your final answer on its own line as: "
             "ANSWER: <value>",
 )
-
 
 def _extract_answer_from_text(text: str) -> str | None:
     """Try to extract a final answer from free-form model text.
@@ -256,28 +292,80 @@ def run_planner(
     api_key: str,
     execute_subtask_fn: Callable[[str, str], str],
     temperature: float = 0.7,
+    system_prompt: str | None = None,
 ) -> dict:
     llm = _make_llm(model, api_base, api_key, temperature)
     messages: list = [
-        SystemMessage(content=build_system_prompt("planner")),
+        SystemMessage(content=system_prompt or build_system_prompt("planner")),
         HumanMessage(content=question),
     ]
     answer, complete, subtasks = None, False, []
     empty_streak = 0
+    _recent_calls: list[str] = []
 
     for step in range(MAX_STEPS):
         try:
             ai_msg: AIMessage = llm.invoke(messages)
         except Exception as e:
-            logger.warning("[Planner] API error (step %d): %s", step, e)
+            err_str = str(e)
+            logger.warning("[Planner] API error (step %d): %s", step, err_str[:200])
+            if "validation error" in err_str:
+                logger.info("[Planner] Validation error at step %d, trying freeform", step)
+                answer, complete = _freeform_fallback_sync(
+                    model, api_base, api_key, temperature, messages)
+                if complete:
+                    break
+                continue
             break
 
         messages.append(ai_msg)
 
         if ai_msg.tool_calls:
             empty_streak = 0
-            answer, complete = _handle_tool_calls(
-                ai_msg, execute_subtask_fn, subtasks, messages)
+            for tc in ai_msg.tool_calls:
+                name = tc["name"]
+                args = tc["args"]
+
+                if name == "finish":
+                    answer = args.get("answer", "")
+                    if not answer or not answer.strip():
+                        logger.warning("[Planner] Empty finish at step %d, nudging", step)
+                        messages.append(ToolMessage(
+                            content='{"status": "error", "reason": "answer is empty — provide a non-empty answer"}',
+                            tool_call_id=tc["id"],
+                        ))
+                        break
+                    complete = True
+                    messages.append(ToolMessage(
+                        content='{"status": "done"}', tool_call_id=tc["id"],
+                    ))
+                    break
+                elif name == "plan_subtask":
+                    instruction = args.get("instruction", "")
+                    task_id = args.get("task_id", f"t{len(subtasks) + 1}")
+
+                    call_sig = instruction[:200]
+                    _recent_calls.append(call_sig)
+                    identical_count = sum(1 for c in _recent_calls if c == call_sig)
+                    if identical_count >= _MAX_IDENTICAL_CALLS:
+                        logger.warning("[Planner] Loop detected at step %d", step)
+                        messages.append(ToolMessage(
+                            content='{"status": "error", "reason": "Loop detected — solve it yourself or call finish."}',
+                            tool_call_id=tc["id"],
+                        ))
+                        break
+
+                    result = execute_subtask_fn(instruction, task_id)
+                    subtasks.append({"task_id": task_id, "instruction": instruction, "result": result})
+
+                    if "Error:" in result and ("500" in result or "error" in result.lower()):
+                        logger.warning("[Planner] Subtask error at step %d", step)
+                        messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
+                        messages.append(_ERROR_NUDGE)
+                        break
+
+                    messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
+
             if complete:
                 break
             continue
@@ -287,25 +375,23 @@ def run_planner(
             empty_streak += 1
             logger.warning("[Planner] Empty response at step %d (streak=%d)", step, empty_streak)
             if empty_streak >= _MAX_EMPTY_BEFORE_FREEFORM:
-                # No-tools fallback: let the model answer freely
                 answer, complete = _freeform_fallback_sync(
                     model, api_base, api_key, temperature, messages)
                 if complete:
                     break
-                # freeform also failed, give up
                 break
             messages.append(_NUDGE)
             continue
 
         empty_streak = 0
-        # Fallback: model wrote tool call as plain text
         parsed = _parse_text_tool_call(text)
         if parsed:
             logger.info("[Planner] Parsed tool call from plain text at step %d", step)
             for tc in parsed:
                 if tc["name"] == "finish":
                     answer = tc["args"].get("answer", "")
-                    complete = True
+                    if answer and answer.strip():
+                        complete = True
                     break
                 elif tc["name"] == "plan_subtask":
                     instruction = tc["args"].get("instruction", "")
@@ -318,7 +404,6 @@ def run_planner(
                 break
             continue
 
-        # Plain text with reasoning but no finish — try to extract answer
         extracted = _extract_answer_from_text(text)
         if extracted:
             logger.info("[Planner] Extracted answer from plain text at step %d", step)
@@ -327,6 +412,20 @@ def run_planner(
             break
 
         logger.info("[Planner] Plain text at step %d (no answer found)", step)
+
+    # ── Fix 3: last-resort — extract from subtask results if planner never finished ──
+    if not complete and subtasks:
+        for st in reversed(subtasks):
+            res = st.get("result", "")
+            extracted = _extract_answer_from_text(res)
+            if extracted:
+                logger.info("[Planner] Last-resort: extracted answer from subtask %s", st["task_id"])
+                answer = extracted
+                complete = True
+                break
+    if not complete and not answer:
+        answer, complete = _freeform_fallback_sync(
+            model, api_base, api_key, temperature, messages)
 
     return _build_result(messages, answer, complete, subtasks)
 
@@ -404,12 +503,28 @@ async def arun_planner(
     ]
     answer, complete, subtasks = None, False, []
     empty_streak = 0
+    _recent_calls: list[str] = []  # Track recent plan_subtask calls for loop detection
 
     for step in range(MAX_STEPS):
+        # ── Fix 2: catch validation errors (bad tool_calls format) and fallback parse ──
         try:
             ai_msg: AIMessage = await llm.ainvoke(messages)
         except Exception as e:
-            logger.warning("[Planner] API error (step %d): %s", step, e)
+            err_str = str(e)
+            logger.warning("[Planner] API error (step %d): %s", step, err_str[:200])
+            # If validation error (e.g. tool_calls.0.args is str not dict),
+            # try freeform fallback instead of giving up immediately
+            # Validation error = bad tool_calls format from vLLM.
+            # Nudge won't help (model repeats same bad format).
+            # Go straight to freeform fallback.
+            if "validation error" in err_str:
+                logger.info("[Planner] Validation error at step %d, trying freeform", step)
+                answer, complete = await _freeform_fallback_async(
+                    model, api_base, api_key, temperature, messages)
+                if complete:
+                    break
+                # freeform failed too — continue loop in case next attempt works
+                continue
             break
 
         messages.append(ai_msg)
@@ -422,6 +537,14 @@ async def arun_planner(
 
                 if name == "finish":
                     answer = args.get("answer", "")
+                    # ── Empty answer guard ──
+                    if not answer or not answer.strip():
+                        logger.warning("[Planner] Empty finish at step %d, nudging", step)
+                        messages.append(ToolMessage(
+                            content='{"status": "error", "reason": "answer is empty — provide a non-empty answer"}',
+                            tool_call_id=tc["id"],
+                        ))
+                        break
                     complete = True
                     messages.append(ToolMessage(
                         content='{"status": "done"}', tool_call_id=tc["id"],
@@ -430,12 +553,33 @@ async def arun_planner(
                 elif name == "plan_subtask":
                     instruction = args.get("instruction", "")
                     task_id = args.get("task_id", f"t{len(subtasks) + 1}")
+
+                    # ── Loop detection ──
+                    call_sig = instruction[:200]
+                    _recent_calls.append(call_sig)
+                    identical_count = sum(1 for c in _recent_calls if c == call_sig)
+                    if identical_count >= _MAX_IDENTICAL_CALLS:
+                        logger.warning("[Planner] Loop detected at step %d: %d identical calls", step, identical_count)
+                        messages.append(ToolMessage(
+                            content='{"status": "error", "reason": "Loop detected — you repeated the same subtask too many times. Solve it yourself or call finish with your best answer."}',
+                            tool_call_id=tc["id"],
+                        ))
+                        break
+
                     result = await execute_subtask_fn(instruction, task_id)
                     subtasks.append({
                         "task_id": task_id,
                         "instruction": instruction,
                         "result": result,
                     })
+
+                    # ── Error detection: nudge planner to change strategy ──
+                    if "Error:" in result and ("500" in result or "error" in result.lower()):
+                        logger.warning("[Planner] Subtask returned error at step %d", step)
+                        messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
+                        messages.append(_ERROR_NUDGE)
+                        break
+
                     messages.append(ToolMessage(
                         content=result, tool_call_id=tc["id"],
                     ))
@@ -444,6 +588,7 @@ async def arun_planner(
                 break
             continue
 
+        # ── Fix 1: empty response — strong nudge with mandatory action ──
         text = (ai_msg.content or "").strip()
         if not text:
             empty_streak += 1
@@ -458,14 +603,15 @@ async def arun_planner(
             continue
 
         empty_streak = 0
-        # Fallback: model wrote tool call as plain text
+        # ── Fix 2: fallback parse for plain-text tool calls / truncated JSON ──
         parsed = _parse_text_tool_call(text)
         if parsed:
             logger.info("[Planner] Parsed tool call from plain text at step %d", step)
             for tc in parsed:
                 if tc["name"] == "finish":
                     answer = tc["args"].get("answer", "")
-                    complete = True
+                    if answer and answer.strip():
+                        complete = True
                     break
                 elif tc["name"] == "plan_subtask":
                     instruction = tc["args"].get("instruction", "")
@@ -487,5 +633,21 @@ async def arun_planner(
             break
 
         logger.info("[Planner] Plain text at step %d (no answer found)", step)
+
+    # ── Fix 3: last-resort — extract from subtask results if planner never finished ──
+    if not complete and subtasks:
+        # Try to salvage an answer from the last subtask result
+        for st in reversed(subtasks):
+            res = st.get("result", "")
+            extracted = _extract_answer_from_text(res)
+            if extracted:
+                logger.info("[Planner] Last-resort: extracted answer from subtask %s", st["task_id"])
+                answer = extracted
+                complete = True
+                break
+    if not complete and not answer:
+        # Final freeform attempt if we have no answer at all
+        answer, complete = await _freeform_fallback_async(
+            model, api_base, api_key, temperature, messages)
 
     return _build_result(messages, answer, complete, subtasks)

@@ -54,6 +54,35 @@ def _strip_math_formatting(s: str) -> str:
     return s.strip()
 
 
+def _strip_latex_wrappers(s: str) -> str:
+    """Strip LaTeX text wrappers: \\text{B} → B, \\textbf{(D)} → (D), etc."""
+    s = re.sub(r'\\(?:text|textbf|textit|textrm|mathrm|mathbf)\{([^{}]*)\}', r'\1', s)
+    # Remove \( ... \) wrappers
+    s = re.sub(r'\\\((.+?)\\\)', r'\1', s)
+    # Remove \: \; \, \! \  spacing commands (including backslash-space)
+    s = re.sub(r'\\[,:;! ]', '', s)
+    return s.strip()
+
+
+def _extract_choice_letter(s: str) -> str | None:
+    """Extract choice letter (A-E) from answer text."""
+    s = _strip_latex_wrappers(s).strip()
+    # Exact single letter
+    if re.fullmatch(r'[A-Ea-e]', s.strip()):
+        return s.strip().upper()
+    # Leading (A) or A followed by separator or content
+    m = re.match(r'^\(?([A-Ea-e])\)?(?:[\s.,:;]|$)', s)
+    if m:
+        return m.group(1).upper()
+    # (A) followed by anything (e.g. "(B)2\sqrt{43}")
+    m = re.match(r'^\(([A-Ea-e])\)', s)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
+
+
 def _try_parse_number(s: str) -> float | None:
     """Try to parse a string as a number, handling fractions and scientific notation."""
     s = _strip_math_formatting(s)
@@ -131,63 +160,89 @@ def _try_compare_interval(pred: str, gold: str) -> bool | None:
             and abs(g_iv[2] - p_iv[2]) < 1e-6)
 
 
-def verify_math(pred: str, gold: str) -> bool:
-    """Verify math answer following OpenCompass logic.
+def _nums_close(a: float, b: float) -> bool:
+    """Check if two numbers are approximately equal."""
+    if b == 0:
+        return abs(a) < 1e-6
+    return abs(a - b) / max(abs(b), 1e-10) < 1e-6
 
-    1. Try direct numeric comparison on raw pred/gold
-    2. Extract last number from pred (OpenCompass style), compare with gold
-    3. Fallback to LaTeX-normalized string match
+
+def verify_math(pred: str, gold: str) -> bool:
+    """Verify math answer following OpenCompass logic + enhanced matching.
+
+    1. Choice-letter match (A/B/C/D/E)
+    2. Direct numeric comparison on raw pred/gold
+    3. Expression eval (handles '27000-16000' → 11000)
+    4. Extract last number from pred (OpenCompass style)
+    5. LaTeX boxed/frac extraction
+    6. Normalized LaTeX string match
+    7. Strip all non-alphanumeric and compare
     """
     pred, gold = str(pred), str(gold)
     if not pred or not gold:
         return False
 
-    # --- Pass 0: interval / set comparison ---
+    # --- Pre-strip LaTeX wrappers on both sides ---
+    pred = _strip_latex_wrappers(pred).strip() or pred.strip()
+    gold = _strip_latex_wrappers(gold).strip() or gold.strip()
+
+    # --- Pass 0a: choice letter match ---
+    pred_letter = _extract_choice_letter(pred)
+    gold_letter = _extract_choice_letter(gold)
+    if pred_letter and gold_letter:
+        return pred_letter == gold_letter
+
+    # --- Pass 0b: exact match after strip ---
+    if pred == gold:
+        return True
+
+    # --- Pass 0c: interval / set comparison ---
     interval = _try_compare_interval(pred, gold)
     if interval is not None:
         return interval
 
     # --- Pass 1: direct numeric comparison ---
-    # Try raw first, then normalized (handles \dfrac → \frac etc.)
     pred_num = _try_parse_number(pred) or _try_parse_number(_normalize_latex(pred))
     gold_num = _try_parse_number(gold) or _try_parse_number(_normalize_latex(gold))
 
     if pred_num is not None and gold_num is not None:
-        if gold_num == 0:
-            return abs(pred_num) < 1e-6
-        return abs(pred_num - gold_num) / max(abs(gold_num), 1e-10) < 1e-6
+        if _nums_close(pred_num, gold_num):
+            return True
 
     # --- Pass 2: extract last number from both pred and gold ---
     pred_last = _extract_last_number(pred)
     gold_last = _extract_last_number(gold)
-    # Use extracted numbers, falling back to already-parsed values
     p_num = _try_parse_number(pred_last) if pred_last else pred_num
     g_num = _try_parse_number(gold_last) if gold_last else gold_num
     if p_num is not None and g_num is not None:
-        if g_num == 0 and abs(p_num) < 1e-6:
-            return True
-        if g_num != 0 and abs(p_num - g_num) / max(abs(g_num), 1e-10) < 1e-6:
+        if _nums_close(p_num, g_num):
             return True
 
     # --- Pass 2b: extract LaTeX expression from pred ---
-    # Look for \boxed{...} or \frac{...}{...} in pred
     boxed = re.findall(r'\\\\?boxed\{((?:[^{}]|\{[^{}]*\})*)\}', pred)
     if boxed:
         boxed_num = _try_parse_number(boxed[-1])
         if gold_num is not None and boxed_num is not None:
-            if gold_num == 0:
-                return abs(boxed_num) < 1e-6
-            return abs(boxed_num - gold_num) / max(abs(gold_num), 1e-10) < 1e-6
+            if _nums_close(boxed_num, gold_num):
+                return True
         if _normalize_latex(boxed[-1]) == _normalize_latex(gold):
             return True
 
     frac_matches = re.findall(r'\\\\?frac\{[^{}]*\}\{[^{}]*\}', pred)
     if frac_matches and gold_num is not None:
         frac_num = _try_parse_number(frac_matches[-1])
-        if frac_num is not None:
-            if gold_num == 0:
-                return abs(frac_num) < 1e-6
-            return abs(frac_num - gold_num) / max(abs(gold_num), 1e-10) < 1e-6
+        if frac_num is not None and _nums_close(frac_num, gold_num):
+            return True
+
+    # --- Pass 2c: evaluate simple arithmetic expressions ---
+    if gold_num is not None and pred_num is None:
+        # pred might be an unevaluated expression like "75+60"
+        try:
+            evaled = float(eval(pred.strip(), {"__builtins__": {}}, {}))
+            if _nums_close(evaled, gold_num):
+                return True
+        except Exception:
+            pass
 
     # --- Pass 3: normalized LaTeX string match ---
     p_norm = _normalize_latex(pred)

@@ -28,7 +28,7 @@ DEFAULT_CONCURRENCY = 32
 
 
 async def arouter_probe(
-    question: str, gold: str, source: str,
+    question: str, gold: str, source: str, domain: str,
     args: argparse.Namespace, pools: PoolConfig,
 ) -> tuple[bool, list[dict]]:
     """Stage 1: test if the current router can already solve this task.
@@ -47,6 +47,8 @@ async def arouter_probe(
             sub_model_api_key=args.sub_model_api_key,
             pools=pools,
             planner_temperature=0.7,
+            domain=domain,
+            source=source,
         )
         ok = result["complete"] and verify(result["answer"], gold, source)
         attempts.append({"attempt": k, "ok": ok, "trajectory": result})
@@ -56,7 +58,7 @@ async def arouter_probe(
 
 
 async def ateacher_run(
-    question: str, gold: str, source: str,
+    question: str, gold: str, source: str, domain: str,
     args: argparse.Namespace, pools: PoolConfig,
 ) -> tuple[bool, dict]:
     """Stage 2: collect a teacher demonstration trajectory."""
@@ -72,6 +74,8 @@ async def ateacher_run(
         sub_model_api_key=args.sub_model_api_key,
         pools=pools,
         planner_temperature=0.3,
+        domain=domain,
+        source=source,
     )
     ok = result["complete"] and verify(result["answer"], gold, source)
     return ok, result
@@ -103,7 +107,7 @@ async def process_one(
 
         # Stage 1: Router probe
         try:
-            router_ok, router_attempts = await arouter_probe(q, gold, src, args, pools)
+            router_ok, router_attempts = await arouter_probe(q, gold, src, domain, args, pools)
         except Exception as e:
             router_ok, router_attempts = False, []
 
@@ -132,7 +136,7 @@ async def process_one(
 
         # Stage 2: Teacher trajectory
         try:
-            teacher_ok, teacher_result = await ateacher_run(q, gold, src, args, pools)
+            teacher_ok, teacher_result = await ateacher_run(q, gold, src, domain, args, pools)
         except Exception as e:
             teacher_ok = False
             teacher_result = {}

@@ -102,8 +102,11 @@ async def arun_agent(
     pools: PoolConfig,
     planner_temperature: float = 0.7,
     router_temperature: float = 0.3,
+    domain: str | None = None,
+    source: str | None = None,
 ) -> dict:
     """Run the full Planner → Router → Executor pipeline (async)."""
+    from scripts.data.prompts import build_system_prompt
     sub_client = AsyncOpenAI(
         base_url=sub_model_api_base, api_key=sub_model_api_key, timeout=60,
     )
@@ -111,6 +114,7 @@ async def arun_agent(
     models_used: list[str] = []
     skills_used: list[str] = []
     routing_decisions: list[dict] = []
+    _failed_models: set[str] = set()  # Track models that returned 500 errors
 
     _extra_async = {"enable_thinking": False} if not _is_local(sub_model_api_base) else {}
 
@@ -126,22 +130,47 @@ async def arun_agent(
             "task_id": task_id, "instruction": instruction,
             "routed_model": selected_model, "routed_skill": selected_skill,
         })
-        try:
-            resp = await sub_client.chat.completions.create(
-                model=selected_model,
-                messages=[{"role": "user", "content": instruction}],
-                temperature=0.1, max_tokens=1024,
-                extra_body=_extra_async,
-            )
-            result = resp.choices[0].message.content.strip()
-        except Exception as e:
-            result = f"Error: {e}"
-        return f"[routed to {selected_model} / {selected_skill}]\n{result}"
+
+        # Try the selected model, then fallback on API error
+        candidates = [selected_model]
+        # If selected model previously failed, try alternatives first
+        if selected_model in _failed_models:
+            fallbacks = [m for m in pools["models"] if m not in _failed_models and m != selected_model]
+            candidates = fallbacks[:2] + [selected_model]
+        else:
+            fallbacks = [m for m in pools["models"] if m != selected_model and m not in _failed_models]
+            candidates = [selected_model] + fallbacks[:2]
+
+        for model_candidate in candidates:
+            try:
+                resp = await sub_client.chat.completions.create(
+                    model=model_candidate,
+                    messages=[{"role": "user", "content": instruction}],
+                    temperature=0.1, max_tokens=1024,
+                    extra_body=_extra_async,
+                )
+                result = resp.choices[0].message.content.strip()
+                actual_model = model_candidate
+                if model_candidate != selected_model:
+                    logger.info("[Executor] Fallback %s → %s for task %s",
+                               selected_model, model_candidate, task_id)
+                return f"[routed to {actual_model} / {selected_skill}]\n{result}"
+            except Exception as e:
+                err_str = str(e)
+                if "500" in err_str or "No available channel" in err_str or "请求数限制" in err_str:
+                    _failed_models.add(model_candidate)
+                    logger.warning("[Executor] API error for %s, trying fallback: %s",
+                                   model_candidate, err_str[:100])
+                    continue
+                return f"[routed to {selected_model} / {selected_skill}]\nError: {e}"
+
+        return f"[routed to {selected_model} / {selected_skill}]\nError: All models unavailable"
 
     planner_result = await arun_planner(
         question=question, model=planner_model,
         api_base=planner_api_base, api_key=planner_api_key,
         execute_subtask_fn=execute_subtask, temperature=planner_temperature,
+        system_prompt=build_system_prompt("planner", domain=domain, source=source),
     )
     return _pack(planner_result, models_used, skills_used, routing_decisions)
 
