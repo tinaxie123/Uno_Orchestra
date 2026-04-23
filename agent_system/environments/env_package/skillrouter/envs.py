@@ -223,15 +223,22 @@ class SingleSkillRouterEnv:
         reward = 0.0
         metadata = {}
 
-        # Format validation: must contain <final_answer> OR (<plan> + <route>)
+        # Format validation.  We accept three shapes, matching what the
+        # SFT model actually emits:
+        #   (a) explicit <final_answer>...</final_answer>    — terminal
+        #   (b) <plan>+<route>                                — routing round
+        #   (c) lazy mode: assistant turn has no <plan>/<route>/<final_answer>
+        #       but is a direct natural-language answer (common for simple
+        #       QA after SFT). Treat the whole turn as the answer.
         has_final = bool(FINAL_RE.search(action))
         has_plan = bool(PLAN_RE.search(action))
         has_route = bool(ROUTE_RE.search(action))
-        format_valid = has_final or (has_plan and has_route)
+        is_lazy = (not has_final) and (not has_plan) and (not has_route) and bool(action.strip())
+        format_valid = has_final or (has_plan and has_route) or is_lazy
         metadata["format_valid"] = format_valid
 
         if not format_valid:
-            # Invalid format → done, no reward
+            # Truly empty / garbage → done, no reward
             self.done = True
             metadata["format_error"] = True
             return {
@@ -241,10 +248,14 @@ class SingleSkillRouterEnv:
                 "metadata": metadata,
             }
 
-        # Check for final_answer
-        final_match = FINAL_RE.search(action)
-        if final_match:
-            self.final_answer = final_match.group(1).strip()
+        # Terminal paths: explicit <final_answer> OR lazy direct-answer
+        if has_final or is_lazy:
+            if has_final:
+                final_match = FINAL_RE.search(action)
+                self.final_answer = final_match.group(1).strip()
+            else:
+                # Lazy mode: trim any stray trailing chat-template tokens
+                self.final_answer = action.strip().rstrip("<|im_end|>").strip()
             self.done = True
             reward = check_correctness(
                 self.final_answer, self.gold, self.source,
@@ -254,6 +265,7 @@ class SingleSkillRouterEnv:
             metadata["source"] = self.source
             metadata["final_answer"] = self.final_answer
             metadata["format_valid"] = True
+            metadata["lazy_mode"] = is_lazy
             return {
                 "observations": observations,
                 "reward": reward,
