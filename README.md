@@ -68,13 +68,13 @@ For each failed trajectory, we feed the full execution trace—including the Orc
 
 Of 12,803 sampled tasks, 5,589 (43.7%) are already solved by the current router and discarded. 7,214 tasks survive to the teacher stage: 3,174 yield successful SFT demonstrations and 4,549 enter the initial RL pool. After overlong filtering (> 8,192 tokens), the base SFT set contains 2,762 trajectories.
 
-**Augmentation & Rescue.** We apply two additional passes to expand SFT and shrink the RL pool:
+**Augmentation & fallback distillation.** We apply two additional passes to expand SFT and shrink the RL pool:
 
 1. **Rejection-sampled augmentation** (`scripts/data/augment_sft.py`): for each SFT task we draw K=2 additional teacher rollouts at temperatures {0.5, 1.0}; hard (RL-pool) tasks receive K=3 at {0.3, 0.7, 1.0}. Only trajectories that pass the per-source verifier are kept. This adds diverse demonstrations for the same questions.
 
-2. **RL-pool rescue** (`scripts/data/rescue_rl_pool.py`): for each task in the RL pool (where the original teacher failed), we retry with a stronger teacher cascade (gemini-2.5-pro, then claude-sonnet-4-6, then gpt-5.4) with pass@3. Tasks that any stronger teacher solves are promoted from RL to SFT.
+2. **Fallback distillation** (`scripts/data/rescue_rl_pool.py`): for each RL-pool task where the original teacher failed, we retry with a stronger teacher cascade (gemini-2.5-pro → claude-sonnet-4-6 → gpt-5.4) under pass@3. Tasks that any fallback teacher resolves are promoted from the RL pool back into SFT demonstrations. This pass cuts the RL pool from 4,549 to **2,976** tasks (−34.6%) by promoting 295 previously unsolvable tasks — largest gains on tool orchestration, where gemini-2.5-pro's code generation resolves TACO tasks that qwen3.5-plus could not.
 
-After augmentation and rescue, the downstream-aligned set covering the seven evaluation benchmarks is:
+The 7-benchmark downstream-aligned slice after both passes:
 
 | Capability Axis         | Benchmarks     |    Sampled |       Router OK |       SFT |   RL Pool |
 | ----------------------- | -------------- | ---------: | --------------: | --------: | --------: |
@@ -85,30 +85,21 @@ After augmentation and rescue, the downstream-aligned set covering the seven eva
 | Tool orchestration      | TACO, ToolACE  |      4,956 |     710 (14.3%) |     1,985 |     1,282 |
 | **Total**               |                | **12,803** | **5,589 (43.7%)** | **3,057** | **2,976** |
 
-The rescue pass reduced the RL pool from 4,549 to **2,976** tasks (−34.6%), converting 295 previously unsolvable tasks into SFT demonstrations. The strongest gains came from tool orchestration, where gemini-2.5-pro's superior code generation solved many TACO tasks that the original qwen3.5-plus teacher could not.
-
-Tool orchestration receives the largest share of SFT demonstrations (64.9%) because routing decisions in this axis involve both model selection *and* skill selection — the router must learn to match coding tasks to code-capable models and API-calling tasks to tool-aware models, requiring more diverse demonstrations than axes where only model selection matters. Atomic reasoning receives the smallest share (1.3%) because the router already solves 96.6% of these tasks; the remaining SFT examples serve primarily as a negative signal, teaching the router to recognize single-step tasks that should *not* be decomposed into subtasks.
-
-The high router-OK rate for atomic reasoning (96.6%) and knowledge retrieval (64.8%) confirms that a 7B-parameter policy can already handle single-hop factual and arithmetic tasks through direct answering. In contrast, the near-zero router-OK rate for tool orchestration (14.3%) validates our design choice to treat tool selection as a learned routing problem rather than a fixed heuristic — the current router cannot solve these tasks without training on delegation trajectories.
-
-### 🍰 Full SFT corpus (61,201 conversations)
-
-The released SFT corpus merges the 7-benchmark downstream-aligned slice above with a broader QA / reasoning backbone generated through the same pipeline:
-
-**A. Main backbone** — 58,457 conversations, QA- and reasoning-heavy. Category rollup:
+We then combine this downstream-aligned slice with a broader QA / reasoning backbone generated through the same pipeline on 31 HuggingFace sources, yielding the **final SFT corpus of 61,201 multi-turn ShareGPT conversations** (system → human → assistant → observation → assistant → ...). Category rollup:
 
 | Category | Count | Share | Member sources |
 |---|---:|---:|---|
-| qa_multi_hop | 31,540 | 54.0% | hotpotqa_fullwiki, 2wikimultihopqa, musique_answerable, bamboogle |
-| reasoning_commonsense | 8,465 | 14.5% | commonsenseqa, strategyqa, social_iqa, piqa, winogrande, logiqa2, arc_challenge, bbh_*, folio |
-| qa_open_domain | 6,787 | 11.6% | nq_open, triviaqa_nocontext, webquestions, quality |
-| knowledge_academic | 6,208 | 10.6% | mmlu_aux_stem, sciq, openbookqa, aqua_rat, theoremqa, legalbench |
-| math | 4,361 | 7.5% | gsm8k_main, hendrycks_math_algebra, hendrycks_math_intermediate_algebra, hendrycks_math_number_theory |
-| code | 1,096 | 1.9% | codeforces_cots, codecontests |
+| qa_multi_hop | 31,957 | 52.2% | hotpotqa_fullwiki, 2wikimultihopqa, musique_answerable, bamboogle |
+| reasoning_commonsense | 8,465 | 13.8% | commonsenseqa, strategyqa, social_iqa, piqa, winogrande, logiqa2, arc_challenge, bbh_*, folio |
+| qa_open_domain | 6,787 | 11.1% | nq_open, triviaqa_nocontext, webquestions, quality |
+| knowledge_academic | 6,208 | 10.1% | mmlu_aux_stem, sciq, openbookqa, aqua_rat, theoremqa, legalbench |
+| math | 4,597 | 7.5% | gsm8k, numinamath, hendrycks_math_{algebra, intermediate_algebra, number_theory} |
+| code | 2,157 | 3.5% | codeforces_cots, codecontests, taco |
+| tool_use | 705 | 1.2% | toolace |
+| reading_comprehension | 289 | 0.5% | drop |
+| other | 36 | 0.1% | misc (source missing from HF-side metadata) |
 
-**B. Downstream-aligned augmentation** — 2,744 conversations covering the 7 evaluation benchmarks (taco 38.7% · toolace 25.7% · drop 10.5% · hotpotqa 8.3% · numinamath 7.2% · musique 6.9% · gsm8k 1.4%) that backbone A does not include.
-
-All conversations are multi-turn ShareGPT (system → human → assistant → observation → assistant → ...) following the schema described in § Training Pipeline.
+Tool orchestration (taco + toolace) within the 7-benchmark slice receives the largest share of its SFT demonstrations (64.9%) because routing decisions there involve both model selection *and* skill selection — the router must match coding tasks to code-capable models and API-calling tasks to tool-aware models, requiring more diverse demonstrations than axes where only model selection matters. Atomic reasoning receives the smallest share (1.3%) because the router already solves 96.6% of these tasks; the remaining SFT examples serve primarily as a negative signal, teaching the router to recognize single-step tasks that should *not* be decomposed. The high router-OK rate for atomic reasoning (96.6%) and knowledge retrieval (64.8%) confirms that a 7B-parameter policy can already handle single-hop factual and arithmetic tasks through direct answering, while the near-zero router-OK rate for tool orchestration (14.3%) validates our design choice to treat tool selection as a learned routing problem rather than a fixed heuristic.
 
 ## 🫐 Training Pipeline
 
