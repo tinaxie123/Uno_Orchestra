@@ -66,13 +66,18 @@ For each failed trajectory, we feed the full execution trace—including the Orc
 
 ## Dataset Description
 
-Each SFT row is a (**real question, synthetic trajectory**) pair. The **real** half — question and gold answer — is sampled verbatim from a public HuggingFace dataset; each row carries a `source` field identifying which one. The **synthetic** half — the full `<plan>/<route>/<obs>/<verify>/<final_answer>` trajectory — is produced by running the curriculum + distillation pipeline (§ Data Selection Pipeline) on that real question, so the trajectory is grounded in a verified gold label rather than model imagination.
+Every SFT row comes from a real public HuggingFace dataset — the `question` and `gold_answer` are sampled verbatim from a `source` we record on the row. We then run the **same pipeline** across every source to produce the multi-turn trajectory that teaches the router *how* to handle that question. No synthetic questions, no hallucinated gold labels; only the trajectory around the real (question, gold) is generated.
 
-### Real-data sources (38 HuggingFace datasets)
+The pipeline has two flavours depending on whether the source requires environment interaction:
 
-We partition every question by its HuggingFace origin. The pipeline is applied uniformly across the union; the only source-specific variation is the planner system prompt (ToolACE injects the dataset's native tool schema, all others are uniform).
+- **Direct distillation (QA / reasoning / math)** — GSM8K, NuminaMath, HotpotQA, MuSiQue, DROP, ToolACE-question-side, the 31 open-domain and commonsense sources. The teacher produces the full `<plan>/<route>/<obs>/<verify>/<final_answer>` trajectory in one shot, with `<obs>` synthesised from the evidence fields already in the dataset (Wikipedia context for HotpotQA, search snippets for TriviaQA, step-by-step solutions for GSM8K, etc. — see § Distillation for the full evidence map). No external worker is invoked — these benchmarks have no runtime environment, so the teacher can write faithful `<obs>` content grounded in the dataset's own supporting passages.
+- **Execution-grounded distillation (TACO code, ToolACE tool-call)** — teacher still writes the trajectory in one shot, but `<obs>` content reflects what a code executor or API endpoint would actually return (drawn from the dataset's reference solutions / schema gold) and is later re-scored by the per-source verifier so only trajectories whose `<final_answer>` matches the real gold survive.
 
-| Category | Count | Share | Member `source` values |
+Both flavours share the same filtering stages, schema constraints, and teacher pool.
+
+### Sources (38 HuggingFace datasets, 9 categories)
+
+| Category | Count | Share | `source` values |
 |---|---:|---:|---|
 | qa_multi_hop | 31,957 | 52.2% | hotpotqa_fullwiki, 2wikimultihopqa, musique_answerable, bamboogle, hotpotqa, musique |
 | reasoning_commonsense | 8,465 | 13.8% | commonsenseqa, strategyqa, social_iqa, piqa, winogrande, logiqa2, arc_challenge, bbh_*, folio |
@@ -84,19 +89,17 @@ We partition every question by its HuggingFace origin. The pipeline is applied u
 | reading_comprehension | 289 | 0.5% | drop |
 | other | 36 | 0.1% | misc rows lacking HF-side metadata |
 
-### Synthetic-trajectory pipeline
+### Two expansion passes on top of the base pipeline
 
-For every real (question, gold) pair we run the three-stage filter in § Data Selection Pipeline, then two expansion passes:
+1. **Rejection-sampled augmentation** (`scripts/data/augment_sft.py`): K=2 extra teacher rollouts at temperatures {0.5, 1.0} for every SFT question; K=3 at {0.3, 0.7, 1.0} for the harder RL-pool questions. Only trajectories that pass the per-source verifier survive — the gold label doubles as a consistency gate.
 
-1. **Rejection-sampled augmentation** (`scripts/data/augment_sft.py`): K=2 extra teacher rollouts at temperatures {0.5, 1.0} for every SFT question; K=3 at {0.3, 0.7, 1.0} for the harder RL-pool questions. Only trajectories that pass the per-source verifier survive — the gold label doubles as a consistency gate on the synthetic rollout.
+2. **Fallback distillation** (`scripts/data/rescue_rl_pool.py`): RL-pool questions — where the primary teacher (qwen3.5-plus) failed — are retried with a stronger cascade (gemini-2.5-pro → claude-sonnet-4-6 → gpt-5.4) under pass@3. Whichever cascade step resolves the question yields a trajectory that is promoted from the RL pool into the SFT corpus. This pass shrinks the RL pool from 4,549 to **2,976** tasks (−34.6%) by promoting 295 previously unsolvable questions; the largest gains are on tool orchestration, where gemini-2.5-pro's code generation resolves TACO tasks qwen3.5-plus could not.
 
-2. **Fallback distillation** (`scripts/data/rescue_rl_pool.py`): RL-pool questions — where the primary teacher (qwen3.5-plus) failed — are retried with a stronger cascade (gemini-2.5-pro → claude-sonnet-4-6 → gpt-5.4) under pass@3. Whichever cascade step resolves the question yields a synthetic trajectory that is promoted from the RL pool into the SFT corpus. This pass shrinks the RL pool from 4,549 to **2,976** tasks (−34.6%) by promoting 295 previously unsolvable questions; the largest gains are on tool orchestration, where gemini-2.5-pro's code generation resolves TACO tasks qwen3.5-plus could not.
-
-Each row in the final corpus carries `teacher` (which model produced the trajectory) and `distillation_pass` (primary / augmentation / fallback) in addition to `source`, so the real↔synthetic provenance is fully traceable.
+Each row carries `teacher` (which model produced the trajectory) and `distillation_pass` (primary / augmentation / fallback) alongside `source`, so the provenance of every trajectory is fully traceable.
 
 ### 7-benchmark evaluation slice statistics
 
-For the seven benchmarks used in downstream evaluation (GSM8K, NuminaMath, DROP, HotpotQA, MuSiQue, TACO, ToolACE), the per-axis filtering numbers are:
+For the seven benchmarks used in downstream evaluation (GSM8K, NuminaMath, DROP, HotpotQA, MuSiQue, TACO, ToolACE):
 
 | Capability Axis         | Benchmarks     |    Sampled |       Router OK |       SFT |   RL Pool |
 | ----------------------- | -------------- | ---------: | --------------: | --------: | --------: |
@@ -111,16 +114,16 @@ Tool orchestration receives the largest share of SFT demonstrations here (64.9%)
 
 ### Final SFT corpus
 
-Union of the 7-benchmark slice above and the broader QA / reasoning body run through the **same** pipeline on the additional 31 HuggingFace sources in the category table: **61,201 multi-turn ShareGPT conversations** (system → human → assistant → observation → assistant → ...). Each row has:
+**61,201 multi-turn ShareGPT conversations** (system → human → assistant → observation → assistant → ...). Each row:
 
 | Field | Type | Description |
 |---|---|---|
 | `id` | string | stable `{source}_{row_id}` identifier |
-| `source` | string | HuggingFace dataset this question came from |
+| `source` | string | HuggingFace dataset the question came from |
 | `category` | string | one of the 9 categories above |
-| `question` | string | verbatim from `source` (real data) |
-| `gold_answer` | string | verbatim from `source` (real data) |
-| `teacher` | string | which LM produced the synthetic trajectory |
+| `question` | string | verbatim from `source` |
+| `gold_answer` | string | verbatim from `source` |
+| `teacher` | string | which LM produced the trajectory |
 | `distillation_pass` | string | `primary` / `augmentation` / `fallback` |
 | `n_plan_rounds` | int | rounds in the trajectory (1 = single round, ≥2 = multi-round) |
 | `n_subtasks` | int | total `<subtask>` count |
