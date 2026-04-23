@@ -259,9 +259,9 @@ Checks: schema validation, message structure, obs quality, gold match, duplicate
 
 ### 🥝 Step 3: SFT Training
 
-**Data.** `router_sft_v6.json` — 61,201 ShareGPT multi-turn conversations (backbone A 58,457 + downstream-aligned B 2,744). Both share the same schema and XML tag set. LlamaFactory's `observation_tag: observation` masks loss on tool turns so gradient flows only through assistant decisions.
+**Data.** The 61,201 trajectories produced by the pipeline above are released as the `sft_full` split of [tinaxie/SkillRouter-Curriculum](https://huggingface.co/datasets/tinaxie/SkillRouter-Curriculum) on Hugging Face.
 
-**Config** — `LlamaFactory/examples/train_full/router_sft_qwen25_7b_v6.yaml`:
+**Config.**
 - Base: Qwen2.5-7B-Instruct, full FT
 - DeepSpeed ZeRO-2, bf16, packing on, cutoff 8,192
 - 2 epochs, lr 2e-5, cosine, warmup 100 steps
@@ -269,35 +269,35 @@ Checks: schema validation, message structure, obs quality, gold match, duplicate
 
 #### 🍏 Hierarchical SFT — Methodology
 
-For every question that survives the three-stage curriculum filter (§ Data Selection Pipeline), the teacher produces an expert trajectory $\tau^\star = (q,\, a_1^\star,\, o_1,\, a_2^\star,\, o_2,\, \ldots,\, a_T^\star)$ where $q$ is the user question, $a_t^\star$ is an expert Orchestrator action at step $t$, and $o_t$ is the observation returned by the dispatched workers. 61,201 such trajectories make up the v6 training corpus.
+For every question that survives the three-stage curriculum filter (§ Data Selection Pipeline), the teacher produces an expert trajectory $\tau^* = (q, a_1^*, o_1, a_2^*, o_2, \ldots, a_T^*)$, where $q$ is the user question, $a_t^*$ is an expert Orchestrator action at step $t$, and $o_t$ is the observation returned by the dispatched workers. 61,201 such trajectories make up the training corpus.
 
-Each Orchestrator action $a_t$ decomposes into a plan commitment $P_t$ followed by a batch of routing commitments $r_{t,1}, \ldots, r_{t,K_t}$; at the final step the action is a single $\textsc{Finish}(y)$ emission. All of these are serialised into a single `assistant` turn under a fixed XML grammar, interleaved with `observation` turns carrying the worker returns $o_t$. We train one policy $\pi_\theta$ (Qwen2.5-7B-Instruct, full FT, DeepSpeed ZeRO-2, 2 epochs, lr 2e-5, effective batch 128) on this corpus under the standard causal-LM next-token objective.
+Each Orchestrator action $a_t$ decomposes into a plan commitment $P_t$ followed by a batch of routing commitments $r_{t,1}, \ldots, r_{t,K_t}$; at the final step the action is a single $\mathrm{Finish}(y)$ emission. All of these are serialised into a single `assistant` turn under a fixed XML grammar, interleaved with `observation` turns carrying the worker returns $o_t$. We train one policy $\pi_\theta$ (Qwen2.5-7B-Instruct, full FT, DeepSpeed ZeRO-2, 2 epochs, lr 2e-5, effective batch 128) on this corpus under the standard causal-LM next-token objective.
 
-**Token-level loss mask.** Every token of every `assistant` turn is a prediction target and contributes to the loss. Every token of every `observation` turn is masked out via `observation_tag: observation` in the LlamaFactory yaml — observations are environment signals, not policy outputs, and must not carry gradient into $\theta$. The system prompt and the user question are masked by default, as in any instruction-tuning recipe. No custom loss-splitting, auxiliary head, or per-action weighting is introduced.
+**Token-level loss mask.** Every token of every `assistant` turn is a prediction target and contributes to the loss. Every token of every `observation` turn is masked out via `observation_tag: observation` in the LlamaFactory yaml: observations are environment signals, not policy outputs, and must not carry gradient into $\theta$. The system prompt and the user question are masked by default, as in any instruction-tuning recipe. No custom loss-splitting, auxiliary head, or per-action weighting is introduced.
 
 #### 🍏 Hierarchical SFT — Theoretical support
 
-Given expert orchestration trajectories $\{(s_t, a_t^\star)\}$, where $s_t$ collects the question and all prior actions and observations, we finetune $\pi_\theta$ by behaviour cloning:
+Given expert orchestration trajectories $\{(s_t, a_t^*)\}$, where $s_t$ collects the question and all prior actions and observations, we finetune $\pi_\theta$ by behaviour cloning:
 
 $$
-\theta^\star \;=\; \arg\max_\theta \; \sum_{\tau^\star} \; \sum_{t=1}^{T} \; \log \pi_\theta\!\left(a_t^\star \mid s_t\right). \tag{1}
+\theta^* = \operatorname*{arg\,max}_{\theta} \sum_{\tau^*} \sum_{t=1}^{T} \log \pi_\theta(a_t^* \mid s_t). \qquad (1)
 $$
 
-In our setting the worker models are frozen and their outputs enter only through the observations $o_t$, so the full trajectory likelihood decomposes into a policy factor and an environment factor
+In our setting the worker models are frozen and their outputs enter only through the observations $o_t$, so the full trajectory likelihood decomposes into a policy factor and an environment factor:
 
 $$
-\log p\!\left(\tau^\star \mid q\right) \;=\; \underbrace{\sum_{t=1}^{T} \log \pi_\theta\!\left(a_t^\star \mid s_t\right)}_{\text{policy factor — the SFT objective}} \;+\; \underbrace{\sum_{t=1}^{T} \log p\!\left(o_t \mid s_t, a_t^\star\right)}_{\text{environment factor — constant in } \theta}, \tag{2}
+\log p(\tau^* \mid q) = \underbrace{\sum_{t=1}^{T} \log \pi_\theta(a_t^* \mid s_t)}_{\text{policy factor (SFT objective)}} + \underbrace{\sum_{t=1}^{T} \log p(o_t \mid s_t, a_t^*)}_{\text{environment factor (constant in } \theta \text{)}}. \qquad (2)
 $$
 
-and maximising the full likelihood in $\theta$ reduces to the policy factor alone. At the token level, dropping the environment factor is exactly the mask that excludes `observation` tokens from the cross-entropy loss; the `assistant` loss of Equation (1) is what the training run actually computes.
+Maximising the full likelihood in $\theta$ therefore reduces to the policy factor alone. At the token level, dropping the environment factor is exactly the mask that excludes `observation` tokens from the cross-entropy loss; the `assistant` loss of Equation (1) is what the training run actually computes.
 
-Each expert action $a_t^\star$ is itself compound: it writes a decomposition $P_t$ and, conditional on that decomposition, a sequence of routing decisions $r_{t,1}, \ldots, r_{t,K_t}$ within the same `assistant` turn. Under the causal-LM parameterisation this joint conditional factorises exactly as
+Each expert action $a_t^*$ is itself compound: it writes a decomposition $P_t$ and, conditional on that decomposition, a sequence of routing decisions $r_{t,1}, \ldots, r_{t,K_t}$ within the same `assistant` turn. Under the causal-LM parameterisation this joint conditional factorises exactly as:
 
 $$
-\pi_\theta(a_t \mid s_t) \;=\; \pi_\theta\!\left(P_t \mid s_t\right) \;\cdot\; \prod_{k=1}^{K_t} \pi_\theta\!\left(r_{t,k} \mid s_t,\; P_t,\; r_{t,<k}\right). \tag{3}
+\pi_\theta(a_t \mid s_t) = \pi_\theta(P_t \mid s_t) \cdot \prod_{k=1}^{K_t} \pi_\theta(r_{t,k} \mid s_t, P_t, r_{t,<k}). \qquad (3)
 $$
 
-Equation (3) is the hierarchical decision structure we want — first commit to a plan, then route each subtask conditional on that plan — obtained here as a consequence of left-to-right causal masking rather than by construction. Combining (1) and (3), the per-step log-likelihood $\log \pi_\theta(a_t^\star \mid s_t)$ decomposes into one term per sub-decision, and a single shared parameter set $\theta$ is optimised against all of them in one forward–backward pass. This is the sense in which SkillRouter's SFT is *hierarchical*: one policy, one loss, two structurally distinct decisions that remain conditionally separated at the token level.
+Equation (3) is the hierarchical decision structure we want: first commit to a plan, then route each subtask conditional on that plan, obtained here as a consequence of left-to-right causal masking rather than by construction. Combining (1) and (3), the per-step log-likelihood $\log \pi_\theta(a_t^* \mid s_t)$ decomposes into one term per sub-decision, and a single shared parameter set $\theta$ is optimised against all of them in one forward–backward pass. This is the sense in which SkillRouter's SFT is *hierarchical*: one policy, one loss, two structurally distinct decisions that remain conditionally separated at the token level.
 
 **Reference SFTTrainer launch (legacy backbone-only path).**
 ```python
