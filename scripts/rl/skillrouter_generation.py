@@ -193,13 +193,32 @@ def _parse_routes_for_latest_round(text: str) -> List[Dict[str, Any]]:
 
 
 def _format_obs_block(routes: List[Dict[str, Any]], responses: List[str]) -> str:
-    """Build the `<obs subtask="...">...</obs>` block to splice into the
-    rolling sequence, in the order the SFT router was trained to consume.
+    """Build the `<obs>` block wrapped in Qwen chat-template role switches
+    so the rendered token stream matches SFT exactly.
+
+    SFT put <obs> in a dedicated `tool` message, sandwiched between the
+    `assistant` turn that emitted the routes and the next `assistant`
+    turn that continues with <verify>/<final_answer>.  So from the
+    router's current (still-open) assistant position we need to:
+
+      (1) close the assistant turn      → <|im_end|>
+      (2) open a tool turn with all obs → <|im_start|>tool\\n…<|im_end|>
+      (3) open a fresh assistant turn   → <|im_start|>assistant\\n
+
+    The Qwen tokenizer recognises <|im_start|>/<|im_end|> as special
+    tokens even with add_special_tokens=False, so the splice tokenises
+    the same way the chat template would render a multi-turn conversation.
     """
-    parts = ["\n"]
-    for r, resp in zip(routes, responses):
-        parts.append(f'<obs subtask="{r["subtask"]}">{resp}</obs>\n')
-    return "".join(parts)
+    obs_lines = "\n".join(
+        f'<obs subtask="{r["subtask"]}">{resp}</obs>'
+        for r, resp in zip(routes, responses)
+    )
+    return (
+        "<|im_end|>\n"
+        "<|im_start|>tool\n"
+        f"{obs_lines}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

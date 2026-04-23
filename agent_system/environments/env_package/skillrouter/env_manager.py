@@ -1,6 +1,20 @@
 """
 SkillRouter Environment Manager for verl-agent.
 Wraps SkillRouterMultiProcessEnv with the verl-agent interface.
+
+Observation rendering matches the Qwen chat-template output the model
+saw at SFT time:
+
+    <|im_start|>system\n{schema prompt}<|im_end|>
+    <|im_start|>user\nQuestion: {q}<|im_end|>
+    <|im_start|>assistant\n<plan>...<route>...</route><|im_end|>
+    <|im_start|>tool\n<obs subtask="1">...</obs>\n...<|im_end|>
+    <|im_start|>assistant\n
+
+After every env-step we re-render the FULL multi-turn conversation so
+the rollout worker's tokenisation matches SFT byte-for-byte; the bit
+after the final `<|im_start|>assistant\n` is where the model's next
+generation picks up.
 """
 
 import os
@@ -21,44 +35,70 @@ except FileNotFoundError:
     print(f"WARNING: System prompt not found at {_SYSTEM_PROMPT_PATH}")
 
 
-INIT_TEMPLATE = """{system_prompt}
+def _chat_turn(role: str, content: str) -> str:
+    """Render one Qwen chat-template turn."""
+    return f"<|im_start|>{role}\n{content}<|im_end|>\n"
 
-Question: {question}
 
-Output the trajectory now."""
+def _render_conversation(
+    question: str,
+    assistant_turns: List[str],
+    tool_turns: List[str],
+    open_assistant: bool = True,
+) -> str:
+    """Render system/user/(assistant/tool)*... with trailing assistant open.
 
-STEP_TEMPLATE = """{system_prompt}
-
-Question: {question}
-
-Prior observations from sub-agents:
-{history}
-
-Continue the trajectory. Generate <verify> and either <final_answer> or a repair <plan>."""
+    - assistant_turns[i]: what the model emitted in the i-th assistant turn
+    - tool_turns[i]:      what the env injected in the i-th tool turn
+    - tool_turns is always one shorter or equal length to assistant_turns:
+        A0 T0 A1 T1 ... A_{n-1} T_{n-1}     (n pairs, env just injected T)
+        A0 T0 A1 T1 ... A_{n-1}             (n assistants, n-1 tools)
+    When open_assistant is True, finish with `<|im_start|>assistant\\n`
+    to cue the model to continue.
+    """
+    parts = [
+        _chat_turn("system", SYSTEM_PROMPT),
+        _chat_turn("user", f"Question: {question}"),
+    ]
+    for i, a in enumerate(assistant_turns):
+        parts.append(_chat_turn("assistant", a))
+        if i < len(tool_turns):
+            parts.append(_chat_turn("tool", tool_turns[i]))
+    if open_assistant:
+        parts.append("<|im_start|>assistant\n")
+    return "".join(parts)
 
 
 class SkillRouterEnvironmentManager(EnvironmentManagerBase):
     """
     EnvironmentManager for SkillRouter.
 
-    The system prompt + question + history are all embedded in the obs text,
-    because verl-agent passes obs_text directly as the user message content.
+    Each env maintains a pair of parallel lists per sample:
+      - assistant_turns[i]: list of prior model outputs (plan+route blocks)
+      - tool_turns[i]:      list of prior env-injected obs blocks
+    After every env-step we emit the next observation as the full
+    rendered Qwen chat template up to the next `<|im_start|>assistant\\n`,
+    so the rollout worker's tokenisation is identical to what SFT saw.
     """
 
     def __init__(self, envs, projection_f, config):
         super().__init__(envs, projection_f, config)
-        self.questions = []
-        self.history = []  # list of lists, one per env
+        self.questions: List[str] = []
+        self.assistant_turns: List[List[str]] = []
+        self.tool_turns: List[List[str]] = []
 
     def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
         obs, infos = self.envs.reset(kwargs=kwargs)
-        self.questions = obs
-        self.history = [[] for _ in range(len(obs))]
+        self.questions = list(obs)
+        n = len(obs)
+        self.assistant_turns = [[] for _ in range(n)]
+        self.tool_turns = [[] for _ in range(n)]
 
         observations = {
-            "text": self._build_init_obs(obs),
+            "text": [_render_conversation(q, [], [], open_assistant=True)
+                     for q in self.questions],
             "image": None,
-            "anchor": obs.copy(),
+            "anchor": list(obs),
         }
         return observations, infos
 
@@ -66,15 +106,33 @@ class SkillRouterEnvironmentManager(EnvironmentManagerBase):
         actions, valids = self.projection_f(text_actions)
         next_obs, rewards, dones, infos = self.envs.step(actions)
 
-        # Store history
+        # 1. record the assistant turn the model just produced (the full
+        #    plan+route block) — SFT put this in assistant role, so do we.
+        # 2. record the tool turn the env just built (one or more <obs>).
         for i in range(len(next_obs)):
-            if i < len(self.history):
-                self.history[i].append(next_obs[i])
+            if i < len(self.assistant_turns):
+                # text_actions[i] is the raw model output; keep it
+                # verbatim so the rendered turn matches what Qwen chat
+                # template would produce.
+                self.assistant_turns[i].append(text_actions[i])
+                if next_obs[i]:
+                    self.tool_turns[i].append(next_obs[i].strip())
 
         anchor = [obs if obs else "" for obs in next_obs]
 
+        # Render full conversation up to the next open assistant cue.
+        next_text = [
+            _render_conversation(
+                self.questions[i],
+                self.assistant_turns[i],
+                self.tool_turns[i],
+                open_assistant=True,
+            )
+            for i in range(len(next_obs))
+        ]
+
         next_observations = {
-            "text": self._build_step_obs(next_obs),
+            "text": next_text,
             "image": None,
             "anchor": anchor,
         }
@@ -85,32 +143,6 @@ class SkillRouterEnvironmentManager(EnvironmentManagerBase):
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
         return next_observations, rewards, dones, infos
-
-    def _build_init_obs(self, questions: List[str]) -> List[str]:
-        """Build initial observation with full system prompt + question."""
-        result = []
-        for q in questions:
-            text = INIT_TEMPLATE.format(
-                system_prompt=SYSTEM_PROMPT,
-                question=q,
-            )
-            result.append(text)
-        return result
-
-    def _build_step_obs(self, obs_list: List[str]) -> List[str]:
-        """Build observation with system prompt + question + history."""
-        result = []
-        for i, obs in enumerate(obs_list):
-            history_parts = self.history[i] if i < len(self.history) else []
-            history = "\n".join(h for h in history_parts if h) if history_parts else obs
-
-            text = STEP_TEMPLATE.format(
-                system_prompt=SYSTEM_PROMPT,
-                question=self.questions[i] if i < len(self.questions) else "",
-                history=history,
-            )
-            result.append(text)
-        return result
 
     def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
         for i in reversed(range(len(total_batch_list[batch_idx]))):
