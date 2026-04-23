@@ -96,9 +96,9 @@ In both cases the per-source verifier scores the teacher's `<final_answer>` agai
 
 Each row carries `teacher` (which model produced the trajectory) and `distillation_pass` (primary / augmentation / fallback) alongside `source`, so the provenance of every trajectory is fully traceable.
 
-### 7-benchmark evaluation slice statistics
+### 7 real-rollout benchmarks selected for analysis
 
-For the seven benchmarks used in downstream evaluation (GSM8K, NuminaMath, DROP, HotpotQA, MuSiQue, TACO, ToolACE):
+For the in-depth capability-gap audit we select the seven benchmarks whose rollouts go through the pipeline end-to-end with real worker execution (GSM8K, NuminaMath, DROP, HotpotQA, MuSiQue, TACO, ToolACE):
 
 | Capability Axis         | Benchmarks     |    Sampled |       Router OK |       SFT |   RL Pool |
 | ----------------------- | -------------- | ---------: | --------------: | --------: | --------: |
@@ -110,6 +110,8 @@ For the seven benchmarks used in downstream evaluation (GSM8K, NuminaMath, DROP,
 | **Total (7-bench slice)** |              | **12,803** | **5,589 (43.7%)** | **3,057** | **2,976** |
 
 Tool orchestration receives the largest share of SFT demonstrations here (64.9%) because routing decisions on this axis involve both model selection *and* skill selection — the router must match coding tasks to code-capable models and API-calling tasks to tool-aware models. Atomic reasoning receives the smallest (1.3%) because the router already solves 96.6% of these tasks; the remaining examples serve as a negative signal teaching the router to recognize single-step questions that should *not* be decomposed. The high router-OK rate for atomic reasoning / knowledge retrieval confirms that a 7B policy can already handle single-hop factual and arithmetic questions through direct answering; the near-zero rate for tool orchestration validates our choice to treat tool selection as a learned routing problem, not a fixed heuristic.
+
+Per-source root-cause breakdown of the 21,642 failing real-rollout trajectories is deferred to § Error Taxonomy below.
 
 ### Final SFT corpus
 
