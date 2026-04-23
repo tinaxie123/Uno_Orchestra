@@ -18,7 +18,7 @@ TRAIN_DATA="${TRAIN_DATA:-/data/xieht/verl-agent/data/skillrouter/train.parquet}
 VAL_DATA="${VAL_DATA:-/data/xieht/verl-agent/data/skillrouter/val.parquet}"
 
 # --- Warm-start SFT ckpt (local) ---
-MODEL_PATH="${MODEL_PATH:-/data/xieht/sft/checkpoints/router_qwen25_7b_full_sft/checkpoint-678}"
+MODEL_PATH="${MODEL_PATH:-/data/xieht/LlamaFactory/outputs/router_qwen25_7b_sft_v4}"
 
 # --- GRPO ---
 group_size=8                 # reduce all-zero group rate: ~77% @ 5 → ~66% @ 8

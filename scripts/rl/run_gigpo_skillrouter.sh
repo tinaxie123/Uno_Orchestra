@@ -9,7 +9,7 @@ TRAIN_DATA="/data/xieht/verl-agent/data/skillrouter/train.parquet"
 VAL_DATA="/data/xieht/verl-agent/data/skillrouter/val.parquet"
 
 # --- Model (local SFT warm-start) ---
-MODEL_PATH="${MODEL_PATH:-/data/xieht/sft/checkpoints/router_qwen25_7b_full_sft/checkpoint-678}"
+MODEL_PATH="${MODEL_PATH:-/data/xieht/LlamaFactory/outputs/router_qwen25_7b_sft_v4}"
 
 # --- GiGPO config ---
 group_size=8
