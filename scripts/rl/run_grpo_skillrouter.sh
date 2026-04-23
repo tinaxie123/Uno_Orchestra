@@ -21,7 +21,7 @@ VAL_DATA="${VAL_DATA:-/data/xieht/verl-agent/data/skillrouter/val.parquet}"
 MODEL_PATH="${MODEL_PATH:-/data/xieht/sft/checkpoints/router_qwen25_7b_full_sft/checkpoint-678}"
 
 # --- GRPO ---
-group_size=5                 # match GiGPO group size for A/B parity
+group_size=8                 # reduce all-zero group rate: ~77% @ 5 → ~66% @ 8
 max_turns=5                  # match max_env_steps=5 from path A
 alpha_init=0.1               # R = (1-α) correctness + α cost_reward
 train_batch_size=64

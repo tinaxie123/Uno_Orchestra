@@ -12,7 +12,7 @@ VAL_DATA="/data/xieht/verl-agent/data/skillrouter/val.parquet"
 MODEL_PATH="${MODEL_PATH:-/data/xieht/sft/checkpoints/router_qwen25_7b_full_sft/checkpoint-678}"
 
 # --- GiGPO config ---
-group_size=5
+group_size=8
 mode="mean_std_norm"
 enable_similarity=True
 similarity_thresh=0.9

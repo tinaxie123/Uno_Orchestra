@@ -365,24 +365,20 @@ class SkillRouterMultiProcessEnv(gym.Env):
                 obs_content = result["observations"][0]["content"]
             next_obs.append(obs_content)
 
-            # Terminal-only reward (Router-R1 style):
-            #   format invalid          → -1.0 (every step it happens, so
-            #                              garbage format dies fast)
-            #   mid-step, valid          →  0.0 (NO cost bonus for just
-            #                              "not having answered yet" — that
-            #                              used to let the policy farm ~0.3
-            #                              per episode by looping)
-            #   terminal, answer wrong   →  0.0
-            #   terminal, answer correct →  (1-α)·1 + α·(1 - cost/budget)
+            # Outcome-only reward:
+            #   mid-step                 → 0.0
+            #   terminal, answer wrong   → 0.0   (includes malformed output —
+            #                                     SFT has already taught the
+            #                                     format, so we don't double-
+            #                                     dip with a format penalty;
+            #                                     a bad trajectory simply can't
+            #                                     produce a correct answer)
+            #   terminal, answer correct → (1-α)·1 + α·(1 - cost/budget)
             correctness = result["reward"]              # 0 / 1 (nonzero only on final_answer)
             is_valid = result.get("metadata", {}).get("format_valid", True)
             done = result["done"]
 
-            if not is_valid:
-                rewards[i] = -1.0
-            elif not done:
-                rewards[i] = 0.0
-            elif correctness <= 0:
+            if not done or correctness <= 0:
                 rewards[i] = 0.0
             else:
                 api_cost = self.envs[i].total_api_cost
