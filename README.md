@@ -67,8 +67,7 @@ For each failed trajectory, we feed the full execution trace—including the Orc
 ## Dataset Description
 
 Every SFT row comes from a real public HuggingFace dataset — the `question` and `gold_answer` are sampled verbatim from a `source` we record on the row. Every row then passes through the **same three-stage pipeline** (§ Data Selection Pipeline) — router probe → teacher trajectory → noise removal — to obtain the multi-turn trajectory that teaches the router how to handle that question.
-
-What the teacher stage looks like differs between QA-style sources and execution sources:
+For different tasks, we adopt different generation pipeline:
 
 - **QA / reasoning / math** — the teacher (Claude Opus) derives the `<plan>/<route>/<obs>/<verify>/<final_answer>` trajectory directly from the question plus the dataset's own context / evidence field (Wikipedia passages for HotpotQA, search snippets for TriviaQA, the step-by-step solution for GSM8K, etc. — see § Distillation for the full evidence map). No external environment is invoked because these benchmarks don't have one.
 - **Code (TACO) / tool use (ToolACE)** — the trajectory is produced through real runtime execution: routed `<route>` calls actually run code in the sandbox or actually fire tool calls against the schema, and the `<obs>` content is the executor's / API's real output, not a reconstruction.
