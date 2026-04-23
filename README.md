@@ -316,7 +316,7 @@ Worker calls go through the **xiaojingai proxy**, which serves each of the 10 cl
 
 ## 🥦 Error Taxonomy
 
-> Scope: the failure analysis below is drawn from the seven benchmarks used end-to-end for evaluation (GSM8K, NuminaMath, DROP, HotpotQA, MuSiQue, TACO, ToolACE). The broader SFT backbone (§ Full SFT corpus) is not used here — we chose the 7-benchmark slice because it aligns exactly with the RL evaluation pool, letting failure modes be traced to evaluation-time regressions.
+> Scope: every failing rollout in the tables below is a **real interaction-mode router trajectory** — the 7B router ran end-to-end through the pipeline (plan → route → real worker API / code executor / tool-schema call → obs → verify → final_answer), and only these execution-grounded rollouts are analysed here. Rollouts that never reached a real worker invocation (e.g. empty outputs, immediate format crashes) are excluded so each failure can be attributed to a concrete routing / worker-response interaction rather than an SFT-warmup artefact. The seven benchmarks in the audit (GSM8K, NuminaMath, DROP, HotpotQA, MuSiQue, TACO, ToolACE) also align exactly with the RL evaluation pool, so every failure mode here is a failure we can later address with RL reward shaping.
 
 ### Base router — Qwen2.5-7B
 
