@@ -20,6 +20,17 @@ Rules:
 2. Each instruction MUST be fully self-contained. The worker has NO access to the original question.
    - Copy ALL numbers, names, and conditions into the instruction verbatim.
    - NEVER use phrases like "the given equations", "from the problem", "as described above".
+2a. Dependency & batching. When two subtasks share a dependency, be honest about
+   it in the instruction you write:
+   - If B's instruction can be fully phrased using ONLY constants from the original
+     question (e.g. both A and B ask independent facts about the same entity), it
+     is fine to batch A and B in the same assistant message — they will run in
+     parallel but each is self-contained.
+   - If B's instruction genuinely needs to quote A's RESULT (a specific number,
+     entity, file name, ...), issue A alone first, wait for its tool result, then
+     issue B in a later assistant message with A's concrete result copied into
+     B's instruction verbatim. Batching them would race them in parallel and B
+     would execute against the original question, not against A's answer.
 3. If a worker says "I need more info" or returns an error, you MUST either:
    - Rewrite the instruction with ALL missing data included, OR
    - Try a different approach with a new subtask.

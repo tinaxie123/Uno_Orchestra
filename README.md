@@ -171,13 +171,12 @@ All generation complete. Docker verification in progress.
 ```
 multiagentRL/
   configs/
-    pools.yaml                 # Worker pool: 9 models x 13 skills
+    pools.yaml                 # Worker pool: 10 models x 13 skills
     sft/                       # SFT training configs
   docs/
-    experiment_plan.md         # Full experiment plan
-    schema.md                  # Trajectory schema v1.1
     pipeline.md                # Data + training pipeline
-    eval_status.md             # Evaluation progress
+    error taxonomy.md          # Teacher/router failure taxonomy
+    case_studies/              # Worked examples (fix-git, subtask-conflict)
   scripts/
     data/                      # Teacher distillation scripts
     sft/                       # SFT training scripts
@@ -204,4 +203,4 @@ bash scripts/sft/run_sft.sh                                           # SFT
 bash scripts/rl/run_gigpo_skillrouter.sh                               # RL
 ```
 
-See `docs/experiment_plan.md` for the complete experiment design.
+See `docs/pipeline.md` for the data + training pipeline overview.

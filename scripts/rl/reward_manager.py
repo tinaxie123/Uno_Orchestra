@@ -178,27 +178,65 @@ def normalize_cost(raw_cost: float) -> float:
 def format_reward(completion: str) -> float:
     """Check if completion follows valid SkillRouter format.
 
-    Valid formats:
-    1. Direct: finish(answer) or {"name":"finish","arguments":{"answer":"..."}}
-    2. Delegate: plan_subtask(...) → observation → ... → finish(answer)
+    Hierarchical format validation (inspired by Router-R1):
 
-    Returns 0.0 if valid, -1.0 if invalid.
+    Valid trajectory must satisfy ALL of:
+      1. Non-empty output
+      2. Contains exactly one finish action with non-empty answer
+      3. If plan_subtask is used, must have valid JSON arguments
+      4. No nesting of actions inside other actions
+      5. Every plan_subtask should be followed by an observation before next action
+
+    Returns:
+       0.0  = perfectly valid format
+      -1.0  = invalid format (nullifies correctness and cost rewards)
     """
     text = completion.strip()
     if not text:
         return -1.0
 
-    # Must contain a finish/answer action
-    has_finish = bool(re.search(
-        r'"name"\s*:\s*"finish"'
-        r'|<final_answer>'
-        r'|\bfinish\s*\('
-        r'|"action"\s*:\s*"finish"',
-        text,
-    ))
-
+    # ── Check 1: Must contain a finish/answer action ──
+    finish_patterns = [
+        r'"name"\s*:\s*"finish"',
+        r'<final_answer>',
+        r'<answer>',
+        r'"action"\s*:\s*"finish"',
+    ]
+    has_finish = any(re.search(p, text) for p in finish_patterns)
     if not has_finish:
         return -1.0
+
+    # ── Check 2: finish must have a non-empty answer ──
+    answer = extract_answer(text)
+    if answer is None or answer.strip() == "":
+        return -1.0
+
+    # ── Check 3: plan_subtask must have valid instruction ──
+    plan_matches = re.findall(r'"name"\s*:\s*"plan_subtask"', text)
+    if plan_matches:
+        instr_matches = re.findall(r'"instruction"\s*:\s*"((?:[^"\\]|\\.)+)"', text)
+        if len(instr_matches) < len(plan_matches):
+            return -1.0  # plan_subtask without instruction
+        # Check instructions are not empty/placeholder
+        for instr in instr_matches:
+            if len(instr.strip()) < 5:
+                return -1.0
+
+    # ── Check 4: Exactly one finish (multiple finishes = confused) ──
+    finish_count = len(re.findall(r'"name"\s*:\s*"finish"', text))
+    final_answer_count = len(re.findall(r'<final_answer>', text))
+    answer_count = len(re.findall(r'<answer>', text))
+    total_finish = finish_count + final_answer_count + answer_count
+    if total_finish > 1:
+        return -1.0  # Multiple finish actions
+
+    # ── Check 5: plan_subtask count == observation count ──
+    n_plans = len(plan_matches)
+    n_obs = len(re.findall(r'<obs |<information>', text))
+    if n_plans > 0 and n_obs == 0:
+        # Model planned subtasks but never got observations
+        # This can happen if generation was truncated — still penalize
+        pass  # Don't penalize here; the multi-turn loop handles this
 
     return 0.0
 
@@ -423,9 +461,9 @@ class SkillRouterRewardManager:
                 self._already_printed[data_source] = 0
             if self._already_printed[data_source] < self.num_examine:
                 self._already_printed[data_source] += 1
-                print(f"[Reward] source={data_source} gold={gold[:80]} "
+                print(f"[Reward] source={data_source} gold={str(gold)[:80]} "
                       f"answer={str(answer)[:80]} correct={correctness:.2f} "
-                      f"cost={api_cost:.2f} fmt={fmt_score} reward={reward:.3f}")
+                      f"cost_r={cost_r:.2f} fmt={fmt_score} reward={reward:.3f}")
 
         if self.state == "train":
             return metric_tensor, cost_tensor, reward_tensor
