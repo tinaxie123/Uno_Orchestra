@@ -267,6 +267,38 @@ Checks: schema validation, message structure, obs quality, gold match, duplicate
 - 2 epochs, lr 2e-5, cosine, warmup 100 steps
 - Effective batch 128 (4 × per_dev 1 × grad_accum 32)
 
+#### 🍏 Hierarchical SFT — Methodology
+
+For every question that survives the three-stage curriculum filter (§ Data Selection Pipeline), the teacher produces an expert trajectory $\tau^\star = (q,\, a_1^\star,\, o_1,\, a_2^\star,\, o_2,\, \ldots,\, a_T^\star)$ where $q$ is the user question, $a_t^\star$ is an expert Orchestrator action at step $t$, and $o_t$ is the observation returned by the dispatched workers. 61,201 such trajectories make up the v6 training corpus.
+
+Each Orchestrator action $a_t$ decomposes into a plan commitment $P_t$ followed by a batch of routing commitments $r_{t,1}, \ldots, r_{t,K_t}$; at the final step the action is a single $\textsc{Finish}(y)$ emission. All of these are serialised into a single `assistant` turn under a fixed XML grammar, interleaved with `observation` turns carrying the worker returns $o_t$. We train one policy $\pi_\theta$ (Qwen2.5-7B-Instruct, full FT, DeepSpeed ZeRO-2, 2 epochs, lr 2e-5, effective batch 128) on this corpus under the standard causal-LM next-token objective.
+
+**Token-level loss mask.** Every token of every `assistant` turn is a prediction target and contributes to the loss. Every token of every `observation` turn is masked out via `observation_tag: observation` in the LlamaFactory yaml — observations are environment signals, not policy outputs, and must not carry gradient into $\theta$. The system prompt and the user question are masked by default, as in any instruction-tuning recipe. No custom loss-splitting, auxiliary head, or per-action weighting is introduced.
+
+#### 🍏 Hierarchical SFT — Theoretical support
+
+Given expert orchestration trajectories $\{(s_t, a_t^\star)\}$, where $s_t$ collects the question and all prior actions and observations, we finetune $\pi_\theta$ by behaviour cloning:
+
+$$
+\theta^\star \;=\; \arg\max_\theta \; \sum_{\tau^\star} \; \sum_{t=1}^{T} \; \log \pi_\theta\!\left(a_t^\star \mid s_t\right). \tag{1}
+$$
+
+In our setting the worker models are frozen and their outputs enter only through the observations $o_t$, so the full trajectory likelihood decomposes into a policy factor and an environment factor
+
+$$
+\log p\!\left(\tau^\star \mid q\right) \;=\; \underbrace{\sum_{t=1}^{T} \log \pi_\theta\!\left(a_t^\star \mid s_t\right)}_{\text{policy factor — the SFT objective}} \;+\; \underbrace{\sum_{t=1}^{T} \log p\!\left(o_t \mid s_t, a_t^\star\right)}_{\text{environment factor — constant in } \theta}, \tag{2}
+$$
+
+and maximising the full likelihood in $\theta$ reduces to the policy factor alone. At the token level, dropping the environment factor is exactly the mask that excludes `observation` tokens from the cross-entropy loss; the `assistant` loss of Equation (1) is what the training run actually computes.
+
+Each expert action $a_t^\star$ is itself compound: it writes a decomposition $P_t$ and, conditional on that decomposition, a sequence of routing decisions $r_{t,1}, \ldots, r_{t,K_t}$ within the same `assistant` turn. Under the causal-LM parameterisation this joint conditional factorises exactly as
+
+$$
+\pi_\theta(a_t \mid s_t) \;=\; \pi_\theta\!\left(P_t \mid s_t\right) \;\cdot\; \prod_{k=1}^{K_t} \pi_\theta\!\left(r_{t,k} \mid s_t,\; P_t,\; r_{t,<k}\right). \tag{3}
+$$
+
+Equation (3) is the hierarchical decision structure we want — first commit to a plan, then route each subtask conditional on that plan — obtained here as a consequence of left-to-right causal masking rather than by construction. Combining (1) and (3), the per-step log-likelihood $\log \pi_\theta(a_t^\star \mid s_t)$ decomposes into one term per sub-decision, and a single shared parameter set $\theta$ is optimised against all of them in one forward–backward pass. This is the sense in which SkillRouter's SFT is *hierarchical*: one policy, one loss, two structurally distinct decisions that remain conditionally separated at the token level.
+
 **Reference SFTTrainer launch (legacy backbone-only path).**
 ```python
 # train_sft.py — torchrun --nproc_per_node=8 train_sft.py
