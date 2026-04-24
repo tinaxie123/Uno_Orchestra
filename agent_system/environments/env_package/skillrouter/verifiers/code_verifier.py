@@ -20,7 +20,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from verl.utils.reward_score.prime_code import compute_score as _prime_compute_score
+# `verl.utils.reward_score.prime_code` pulls in `pyext`, which is
+# py2-era and fails to build under Python 3.12. Import it lazily so
+# merely importing this module (e.g. for registry-side-effect in the
+# rollout) doesn't explode on the pyext compat gap. We only need it
+# when a row actually ships runnable stdin/stdout tests.
 
 
 def verify_code(pred: str, gold: str, tests: Any = None) -> bool:
@@ -29,6 +33,9 @@ def verify_code(pred: str, gold: str, tests: Any = None) -> bool:
 
     if isinstance(tests, dict) and tests.get("inputs") and tests.get("outputs"):
         try:
+            from verl.utils.reward_score.prime_code import (
+                compute_score as _prime_compute_score,
+            )
             success, _meta = _prime_compute_score(pred, tests)
             return bool(success)
         except Exception:
