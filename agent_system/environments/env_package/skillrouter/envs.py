@@ -57,6 +57,20 @@ VALID_SKILLS = {
     "execute_python", "execute_shell", "fact_check", "call_api",
 }
 
+# Sources where a "lazy" direct-answer (no <plan>/<route>) is legitimate
+# — atomic reasoning / single-hop knowledge questions the router should
+# learn to NOT decompose. Everything else (multi-hop QA, code, tool,
+# competition math, reading comprehension) must emit at least one
+# <plan>+<route> before a <final_answer>; otherwise the episode would
+# collapse to a 1-turn rollout and never exercise multi-turn routing.
+LAZY_ALLOWED_SOURCES = {
+    "gsm8k", "gsm8k_main",
+    "commonsenseqa", "arc_challenge", "piqa", "social_iqa", "winogrande",
+    "openbookqa", "mmlu_aux_stem", "sciq", "aqua_rat",
+    "strategyqa", "logiqa2", "folio",
+    "bbh_formal_fallacies", "bbh_logical_deduction",
+}
+
 # Per-token cost (USD per 1M output tokens)
 MODEL_COST_PER_M_TOKENS = {
     # output price USD per 1M tokens (from configs/pools.yaml)
@@ -71,9 +85,34 @@ MODEL_COST_PER_M_TOKENS = {
     "claude-sonnet-4-6": 15.00,
     "claude-opus-4-6": 75.00,
 }
-MAX_COST_PER_ROUTE = MODEL_COST_PER_M_TOKENS["claude-opus-4-6"] * 500 / 1e6
-MAX_EPISODE_COST = MAX_COST_PER_ROUTE * 8
-DEFAULT_ALPHA = 0.1
+# ── Rolling-percentile cost normalisation (Router-R1 style) ──────────
+# Instead of dividing by a fixed budget cap, maintain a rolling buffer of
+# recent episode costs, sqrt-transform to compress Opus/Flash's 100×
+# ratio, and percentile-normalise so the 5-95% band maps to [0, 1] with
+# cheap → 1 and expensive → 0. Matches Router-R1's main_ppo.py:41-72
+# and removes the BUDGET_CAP magic number.
+_COST_WINDOW_SIZE = 1000
+_COST_Q_LOW, _COST_Q_HIGH = 0.05, 0.95
+_COST_EPS = 1e-8
+_cost_buffer: List[float] = []
+
+
+def _rolling_percentile_cost_reward(raw_cost: float) -> float:
+    """Router-R1-style cost reward in [0, 1]. Cheaper → higher."""
+    r = float(np.sqrt(max(raw_cost, 0.0)))
+    _cost_buffer.append(r)
+    if len(_cost_buffer) > _COST_WINDOW_SIZE:
+        del _cost_buffer[: len(_cost_buffer) - _COST_WINDOW_SIZE]
+    arr = np.asarray(_cost_buffer, dtype=np.float32)
+    if arr.size >= 2:
+        r_min = float(np.percentile(arr, 100 * _COST_Q_LOW))
+        r_max = float(np.percentile(arr, 100 * _COST_Q_HIGH))
+    else:
+        r_min, r_max = float(arr.min()), float(arr.max())
+    denom = r_max - r_min
+    if denom < _COST_EPS:
+        return 0.5
+    return 1.0 - float(np.clip((r - r_min) / denom, 0.0, 1.0))
 
 # Skill → system prompt for sub-agent
 SKILL_PROMPTS = {
@@ -197,7 +236,10 @@ class SingleSkillRouterEnv:
         self.data_source = None
         self.source = None
         self.tests = None
-        self.max_turns = 3
+        # default aligned with rollout_loop's max_steps=5 so the env
+        # doesn't force-done before the RL loop's iteration budget runs
+        # out. env_manager overrides this via extras["max_turns"].
+        self.max_turns = 5
         self.current_round = 0
         self.total_api_cost = 0.0
         self.total_output_tokens = 0
@@ -234,6 +276,25 @@ class SingleSkillRouterEnv:
         has_plan = bool(PLAN_RE.search(action))
         has_route = bool(ROUTE_RE.search(action))
         is_lazy = (not has_final) and (not has_plan) and (not has_route) and bool(action.strip())
+
+        # Lazy-mode is only legitimate for atomic-reasoning sources the
+        # router should learn to NOT decompose. For multi-hop / code /
+        # tool / competition-math, require routing before accepting a
+        # final answer — otherwise the episode collapses to 1 turn and
+        # the RL loop never exercises env feedback.
+        src_key = (self.source or "").lower()
+        lazy_allowed = src_key in LAZY_ALLOWED_SOURCES
+        if is_lazy and not lazy_allowed:
+            is_lazy = False
+            metadata["lazy_rejected"] = True
+        if has_final and not (has_plan or has_route) and not lazy_allowed:
+            # "<final_answer> without any plan/route" on a source that
+            # requires routing is a lazy bypass in disguise — treat as
+            # malformed so the episode gets 0 reward and the policy
+            # gradient doesn't reinforce gold-mimicry.
+            has_final = False
+            metadata["lazy_rejected"] = True
+
         format_valid = has_final or (has_plan and has_route) or is_lazy
         metadata["format_valid"] = format_valid
 
@@ -326,7 +387,7 @@ class SkillRouterMultiProcessEnv(gym.Env):
         self.batch_size = env_num * group_n
         self.is_train = is_train
         self.max_steps = env_config.max_steps if env_config else 3
-        self.alpha = env_config.get("alpha", DEFAULT_ALPHA) if env_config else DEFAULT_ALPHA
+        self.alpha = env_config.get("alpha", 0.1) if env_config else 0.1
 
         self.envs = [SingleSkillRouterEnv() for _ in range(self.batch_size)]
         # More workers for parallel API calls
@@ -394,7 +455,7 @@ class SkillRouterMultiProcessEnv(gym.Env):
                 rewards[i] = 0.0
             else:
                 api_cost = self.envs[i].total_api_cost
-                r_cost = 1.0 - min(api_cost / MAX_EPISODE_COST, 1.0) if MAX_EPISODE_COST > 0 else 1.0
+                r_cost = _rolling_percentile_cost_reward(api_cost)
                 rewards[i] = (1 - self.alpha) * correctness + self.alpha * r_cost
 
             dones[i] = done

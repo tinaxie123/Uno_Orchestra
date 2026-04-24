@@ -8,23 +8,19 @@ import preamble. It handles stdin/stdout problems directly; fn_name
 Tests format (injected into env_kwargs["tests"] by the parquet builder):
     {"inputs": [str, ...], "outputs": [str, ...]}    # stdin/stdout
 
-When `tests` is missing (rare — TACO row with no usable IO), we fall back
-to the loose structural check so the reward signal is at least non-zero
-for code-shaped outputs.
+When `tests` is missing, we deliberately return False instead of running
+a structural check. The earlier structural fallback (any string with
+`def` + `return` + `for/if` + ≥30 chars → True) gave the RL policy a
+trivial proxy reward that rewarded emitting plausible-looking code
+regardless of correctness. Returning False forces the upstream RL
+parquet builder to actually pipe the TACO input/output test cases
+through env_kwargs["tests"].
 """
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from verl.utils.reward_score.prime_code import compute_score as _prime_compute_score
-
-
-def _structural_check(code: str) -> bool:
-    has_def = bool(re.search(r'\b(def|class)\b', code))
-    has_output = bool(re.search(r'\b(return|print)\b', code))
-    has_logic = bool(re.search(r'(for|while|if|elif|else|try|with)\b', code))
-    return has_def and has_output and len(code.strip()) >= 30 and has_logic
 
 
 def verify_code(pred: str, gold: str, tests: Any = None) -> bool:
@@ -38,4 +34,5 @@ def verify_code(pred: str, gold: str, tests: Any = None) -> bool:
         except Exception:
             return False
 
-    return _structural_check(pred)
+    # No runnable tests → we cannot verify the code. Refuse to guess.
+    return False

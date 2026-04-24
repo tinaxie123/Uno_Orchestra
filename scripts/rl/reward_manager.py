@@ -3,8 +3,9 @@ SkillRouter reward manager for GRPO training.
 
 Reward: R = (1 - α) * R_correctness + α * R_cost
   - R_correctness: per-source verifier (math/qa/code/toolace)
-  - R_cost: sqrt + percentile-normalized API cost (1=cheapest, 0=most expensive)
-  - Format invalid → R = -1 (hard penalty)
+  - R_cost: sqrt + rolling-percentile-normalised API cost (1 = cheapest, 0 = most expensive)
+  - Terminal-only: wrong / invalid / incomplete → 0.0 (no format penalty —
+    SFT already taught the schema, so we don't double-dip).
   - α: adaptive schedule (ramps from alpha_init to alpha_final)
 
 Compatible with Router-R1's verl RewardManager interface.
@@ -64,59 +65,63 @@ MODEL_OUTPUT_PRICES = {
 ASSUMED_INPUT_TOKENS = 1024
 ASSUMED_OUTPUT_TOKENS = 256
 
-# Budget cap: cost above this → cost_reward = 0
-# Roughly 2 calls to a mid-tier model ($3/M)
-#   2 × (0.50×1024 + 3.00×256) / 1M = $0.002 per call × 2 = $0.004
-BUDGET_CAP_USD = 0.01  # $0.01 per task
+# ── Rolling-percentile cost normalisation (Router-R1 style) ──────────
+# Following Router-R1 (main_ppo.py:41-72): instead of dividing by a hard-
+# coded budget cap, we keep a rolling buffer of recent per-episode costs,
+# sqrt-transform them to compress the long tail (Opus is ~100× Flash),
+# and percentile-normalise so that the 5-95% band maps to [0, 1] with
+# cheap → 1 and expensive → 0. This is robust to outliers (one runaway
+# Opus rollout no longer saturates the signal forever) and removes the
+# magic BUDGET_CAP knob.
+_COST_WINDOW_SIZE = 1000
+_COST_Q_LOW, _COST_Q_HIGH = 0.05, 0.95
+_COST_TRANSFORM = "sqrt"   # {"sqrt", "log", "none"}
+_COST_LOG_ALPHA = 0.01     # only used when _COST_TRANSFORM == "log"
+_COST_EPS = 1e-8
+_cost_buffer: deque = deque(maxlen=_COST_WINDOW_SIZE)
+
+
+def _preprocess_cost(c: float) -> float:
+    if _COST_TRANSFORM == "sqrt":
+        return float(np.sqrt(max(c, 0.0)))
+    if _COST_TRANSFORM == "log":
+        return float(np.log1p(_COST_LOG_ALPHA * max(c, 0.0)))
+    return float(max(c, 0.0))
+
+
+def _rolling_percentile_cost_reward(raw_cost: float) -> float:
+    """Router-R1-style cost reward in [0, 1]. Cheaper → higher."""
+    r = _preprocess_cost(raw_cost)
+    _cost_buffer.append(r)
+    arr = np.asarray(_cost_buffer, dtype=np.float32)
+    if arr.size >= 2:
+        r_min = float(np.percentile(arr, 100 * _COST_Q_LOW))
+        r_max = float(np.percentile(arr, 100 * _COST_Q_HIGH))
+    else:
+        r_min, r_max = float(arr.min()), float(arr.max())
+    denom = r_max - r_min
+    if denom < _COST_EPS:
+        return 0.5  # buffer too narrow to distinguish cheap vs expensive
+    return 1.0 - float(np.clip((r - r_min) / denom, 0.0, 1.0))
+
+
+_ROUTE_RE = re.compile(
+    r'<route\s+round="\d+"\s+subtask="\d+"\s+model="([^"]+)"\s+skill="[^"]+"\s*>'
+    r"(.*?)</route>",
+    re.DOTALL,
+)
 
 
 def _extract_routes(completion: str) -> list[dict]:
-    """Extract routing decisions from trajectory text.
-
-    Returns list of {"model": str, "instruction": str} for each delegation.
-    Combines model selection and instruction extraction from multiple patterns.
+    """Pull every `<route round="N" subtask="K" model="M" skill="S">query</route>`
+    from a rollout, returning {"model": M, "instruction": query}.
+    Matches the SFT schema v6; used by `estimate_cost` to price the
+    trajectory at reward time.
     """
-    # Step 1: Extract all instructions (from plan_subtask JSON)
-    instructions = []
-    for m in re.finditer(r'"instruction"\s*:\s*"((?:[^"\\]|\\.)*)"', completion):
-        instructions.append(m.group(1).replace('\\"', '"').replace('\\n', '\n'))
-
-    # Step 2: Extract all model selections
-    models = []
-
-    # Pattern A: <search>ModelName:query</search> (Router-R1 style)
-    for m in re.finditer(r'<search>\s*([^:<>\n]+?)\s*:\s*(.*?)</search>', completion, re.DOTALL):
-        name = m.group(1).strip()
-        query = m.group(2).strip()
-        if name in MODEL_OUTPUT_PRICES:
-            models.append(name)
-            if not instructions:
-                instructions.append(query)
-
-    # Pattern B: [routed to ModelName / skill]
-    for m in re.finditer(r'\[routed to\s+([^\]/]+?)(?:\s*/\s*[\w_]+)?\]', completion):
-        name = m.group(1).strip()
-        if name in MODEL_OUTPUT_PRICES:
-            models.append(name)
-
-    # Pattern C: JSON "model": "name"
-    for m in re.finditer(r'"(?:model|routed_model)"\s*:\s*"([^"]+)"', completion):
-        name = m.group(1).strip()
-        if name in MODEL_OUTPUT_PRICES:
-            models.append(name)
-
-    if not models and not instructions:
-        return []
-
-    # Step 3: Pair models with instructions
-    n = max(len(models), len(instructions), 1)
-    routes = []
-    for i in range(n):
-        model = models[i] if i < len(models) else (models[0] if models else "")
-        instr = instructions[i] if i < len(instructions) else ""
-        routes.append({"model": model, "instruction": instr})
-
-    return routes
+    return [
+        {"model": model.strip(), "instruction": query.strip()}
+        for model, query in _ROUTE_RE.findall(completion)
+    ]
 
 
 def estimate_cost(completion: str, tokenizer=None) -> float:
@@ -159,86 +164,22 @@ def estimate_cost(completion: str, tokenizer=None) -> float:
 def compute_cost_reward(completion: str, tokenizer=None) -> float:
     """Compute cost reward ∈ [0, 1] where 1 = cheapest.
 
-    Formula: 1 - clamp(estimated_cost / budget_cap, 0, 1)
+    Uses Router-R1's rolling-percentile normalisation (see
+    `_rolling_percentile_cost_reward`). No hardcoded budget cap — the
+    buffer adapts to the cost distribution seen during training so the
+    same α weight works across different worker-pool mixes.
     """
     cost = estimate_cost(completion, tokenizer)
-    if cost <= 0:
-        return 1.0  # No delegation = free = max reward
-    ratio = min(cost / BUDGET_CAP_USD, 1.0)
-    return 1.0 - ratio
+    return _rolling_percentile_cost_reward(cost)
 
 
 def normalize_cost(raw_cost: float) -> float:
-    """Legacy interface — wraps compute_cost_reward for backward compat."""
-    return compute_cost_reward(str(raw_cost))
-
-
-# ── Format validation ────────────────────────────────────────
-
-def format_reward(completion: str) -> float:
-    """Check if completion follows valid SkillRouter format.
-
-    Hierarchical format validation (inspired by Router-R1):
-
-    Valid trajectory must satisfy ALL of:
-      1. Non-empty output
-      2. Contains exactly one finish action with non-empty answer
-      3. If plan_subtask is used, must have valid JSON arguments
-      4. No nesting of actions inside other actions
-      5. Every plan_subtask should be followed by an observation before next action
-
-    Returns:
-       0.0  = perfectly valid format
-      -1.0  = invalid format (nullifies correctness and cost rewards)
-    """
-    text = completion.strip()
-    if not text:
-        return -1.0
-
-    # ── Check 1: Must contain a finish/answer action ──
-    finish_patterns = [
-        r'"name"\s*:\s*"finish"',
-        r'<final_answer>',
-        r'<answer>',
-        r'"action"\s*:\s*"finish"',
-    ]
-    has_finish = any(re.search(p, text) for p in finish_patterns)
-    if not has_finish:
-        return -1.0
-
-    # ── Check 2: finish must have a non-empty answer ──
-    answer = extract_answer(text)
-    if answer is None or answer.strip() == "":
-        return -1.0
-
-    # ── Check 3: plan_subtask must have valid instruction ──
-    plan_matches = re.findall(r'"name"\s*:\s*"plan_subtask"', text)
-    if plan_matches:
-        instr_matches = re.findall(r'"instruction"\s*:\s*"((?:[^"\\]|\\.)+)"', text)
-        if len(instr_matches) < len(plan_matches):
-            return -1.0  # plan_subtask without instruction
-        # Check instructions are not empty/placeholder
-        for instr in instr_matches:
-            if len(instr.strip()) < 5:
-                return -1.0
-
-    # ── Check 4: Exactly one finish (multiple finishes = confused) ──
-    finish_count = len(re.findall(r'"name"\s*:\s*"finish"', text))
-    final_answer_count = len(re.findall(r'<final_answer>', text))
-    answer_count = len(re.findall(r'<answer>', text))
-    total_finish = finish_count + final_answer_count + answer_count
-    if total_finish > 1:
-        return -1.0  # Multiple finish actions
-
-    # ── Check 5: plan_subtask count == observation count ──
-    n_plans = len(plan_matches)
-    n_obs = len(re.findall(r'<obs |<information>', text))
-    if n_plans > 0 and n_obs == 0:
-        # Model planned subtasks but never got observations
-        # This can happen if generation was truncated — still penalize
-        pass  # Don't penalize here; the multi-turn loop handles this
-
-    return 0.0
+    """Legacy interface — wraps the rolling-percentile normaliser directly."""
+    try:
+        c = float(raw_cost)
+    except (TypeError, ValueError):
+        return 0.5
+    return _rolling_percentile_cost_reward(c)
 
 
 def extract_answer(completion: str) -> str | None:
@@ -317,43 +258,50 @@ def _em_score(pred: str, gold: str) -> float:
     return 1.0 if _normalize_text(pred) == _normalize_text(gold) else 0.0
 
 
-# ── Source → scorer mapping ──────────────────────────────────
-# Uses the dedicated verifiers for each source type.
+# ── Per-source verifier routing ───────────────────────────────
+# Each entry maps a `source` value (from the RL parquet's extra_info)
+# to the binary verifier to use on its final answer. Categories that
+# don't need special handling fall back to token-level F1.
 
-SOURCE_TO_SCORER = {
-    # QA sources → token-level F1 (standard SQuAD-style)
-    "drop": _f1_score,
-    "hotpotqa": _f1_score,
-    "musique": _f1_score,
-    "knowledge_retrieval": _f1_score,
-    "knowledge_composition": _f1_score,
-    # Math → symbolic equivalence (sympy) with numeric/string fallback
-    "gsm8k": verify_math,
-    "numinamath": verify_math,
-    "atomic_reasoning": verify_math,
-    "compositional_reasoning": verify_math,
-    # Code → execution-based (subprocess + test case comparison)
-    "taco": lambda pred, gold: verify_code_exec(pred, gold),
-    # Tool → structured API call matching (function name + params)
-    "toolace": verify_toolace,
-    "tool_orchestration": _f1_score,
+_MATH_SOURCES = {
+    "gsm8k", "gsm8k_main", "numinamath",
+    "hendrycks_math_algebra", "hendrycks_math_intermediate_algebra",
+    "hendrycks_math_number_theory", "aqua_rat", "theoremqa",
 }
+_CODE_SOURCES = {"taco", "codecontests", "codeforces_cots"}
+_TOOL_SOURCES = {"toolace"}
+# Everything else (qa_*, reading_comprehension, reasoning_commonsense,
+# knowledge_academic, etc.) falls through to F1 below.
 
 
-def compute_correctness(pred: str, gold: str, data_source: str,
-                        question: str = "") -> float:
-    """Compute correctness score for a prediction.
-
-    Args:
-        pred: Predicted answer text
-        gold: Gold answer
-        data_source: Source identifier (determines which verifier to use)
-        question: Original question (needed for TACO test case extraction)
+def _taco_verify(pred: str, gold: str, question: str, tests: dict | None) -> float:
+    """Score a TACO/code rollout. Prefer the oracle test cases from
+    `env_kwargs`; fall back to the subprocess executor when missing.
+    Reuses the env-side PRIME harness so Path A (GiGPO) and Path B (GRPO)
+    grade code identically at train time.
     """
-    if data_source in ("taco",):
-        return verify_code_exec(pred, gold, question)
-    scorer = SOURCE_TO_SCORER.get(data_source, _f1_score)
-    return scorer(pred, gold)
+    if isinstance(tests, dict) and tests.get("inputs") and tests.get("outputs"):
+        try:
+            from agent_system.environments.env_package.skillrouter.verifiers.code_verifier import (
+                verify_code as _prime_verify,
+            )
+            return 1.0 if _prime_verify(pred, gold, tests=tests) else 0.0
+        except Exception:
+            pass
+    return verify_code_exec(pred, gold, question)
+
+
+def compute_correctness(pred: str, gold: str, source: str,
+                        question: str = "", tests: dict | None = None) -> float:
+    """Binary correctness score for a rollout, routed by `source`."""
+    key = source.lower() if isinstance(source, str) else ""
+    if key in _CODE_SOURCES:
+        return _taco_verify(pred, gold, question, tests)
+    if key in _MATH_SOURCES:
+        return float(verify_math(pred, gold))
+    if key in _TOOL_SOURCES:
+        return float(verify_toolace(pred, gold))
+    return _f1_score(pred, gold)
 
 
 # ── RewardManager (verl-compatible) ──────────────────────────
@@ -403,20 +351,19 @@ class SkillRouterRewardManager:
                 reward_model_data = json.loads(reward_model_data)
             gold = reward_model_data.get('ground_truth', '')
 
-            # 1. Format check
-            fmt_score = format_reward(completion)
-
-            # 2. Extract answer
+            # 1. Extract answer
             answer = extract_answer(completion)
 
-            # 3. Cost reward (from trajectory text, tokenizer for exact count)
+            # 2. Cost reward (from trajectory text, tokenizer for exact count)
             cost_r = compute_cost_reward(completion, self.tokenizer)
 
-            # 4. Route count
+            # 3. Route count
             n_routes = route_count(completion)
 
-            # 5. Compute correctness
-            # Get question for TACO code execution
+            # 4. Compute correctness — verifier is routed by `source`
+            # (the actual HF dataset name), not by `data_source` which is
+            # the broader category. prepare_prompt_pool stashes the source
+            # + per-sample TACO test cases in extra_info.
             extra_info = data_item.non_tensor_batch.get('extra_info', '{}')
             if isinstance(extra_info, str):
                 try:
@@ -424,23 +371,26 @@ class SkillRouterRewardManager:
                 except Exception:
                     extra_info = {}
             question = extra_info.get('question', '')
+            source = extra_info.get('source', data_source)  # fall back to category
+            tests = extra_info.get('tests')                 # None for non-code
 
             if answer is None:
                 correctness = 0.0
                 em_score = 0.0
                 f1_score_val = 0.0
             else:
-                correctness = compute_correctness(answer, gold, data_source, question)
+                correctness = compute_correctness(
+                    answer, gold, source, question, tests=tests
+                )
                 em_score = _em_score(answer, gold)
                 f1_score_val = _f1_score(answer, gold)
 
-            # 6. Combine reward:
-            #   Format invalid → -1.0
-            #   Answer wrong   →  0.0
-            #   Answer correct → (1-α) × correctness + α × cost_reward
-            if fmt_score < 0:
-                reward = -1.0
-            elif correctness == 0:
+            # 5. Terminal-only reward. No format penalty — SFT already
+            #    taught the schema; a malformed output simply can't yield
+            #    a correct answer, so it collapses to correctness == 0.
+            #   wrong / invalid / no answer → 0.0
+            #   correct                      → (1-α) × correctness + α × cost_reward
+            if correctness == 0:
                 reward = 0.0
             else:
                 reward = (1.0 - self.cost_coe) * correctness + self.cost_coe * cost_r
@@ -463,7 +413,7 @@ class SkillRouterRewardManager:
                 self._already_printed[data_source] += 1
                 print(f"[Reward] source={data_source} gold={str(gold)[:80]} "
                       f"answer={str(answer)[:80]} correct={correctness:.2f} "
-                      f"cost_r={cost_r:.2f} fmt={fmt_score} reward={reward:.3f}")
+                      f"cost_r={cost_r:.2f} reward={reward:.3f}")
 
         if self.state == "train":
             return metric_tensor, cost_tensor, reward_tensor

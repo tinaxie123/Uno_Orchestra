@@ -95,7 +95,8 @@ class GenerationConfig:
     # client, we surface it here so validation can shrink it.
     route_timeout_s: float = 60.0
     # Hard cap: if a sample blows past this many USD of total cost across
-    # its rollout it is forced to done (matches MAX_EPISODE_COST in envs).
+    # its rollout it is forced to done. Defaults to 8 × Opus-sized routes
+    # (≈ the worst plausible episode before the router should have stopped).
     max_episode_cost_usd: float = field(
         default_factory=lambda: MODEL_COST_PER_M_TOKENS["claude-opus-4-6"] * 500 / 1e6 * 8
     )
@@ -529,8 +530,7 @@ class SkillRouterGenerationManager:
                 per_sample_cost[sample_i] = step_cost
                 self._episode_cost[sample_i] += step_cost
 
-                # Cost cap: if the sample has now spent more than the
-                # per-episode cap, force-done.  Matches env's MAX_EPISODE_COST.
+                # Hard per-episode cost cap — force-done once exceeded.
                 if self._episode_cost[sample_i] >= self.config.max_episode_cost_usd:
                     dones[sample_i] = True
 

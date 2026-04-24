@@ -26,14 +26,18 @@ if "/data/xieht/verl-agent" not in sys.path:
 import verl.trainer.main_ppo as main_ppo_module
 from reward_manager import (
     SkillRouterRewardManager,
-    format_reward,
     normalize_cost,
     route_count,
 )
 main_ppo_module.RewardManager = SkillRouterRewardManager
 main_ppo_module.normalize_reward = normalize_cost
-main_ppo_module.format_reward = format_reward
 main_ppo_module.route_count = route_count
+# Router-R1's main_ppo expects a `format_reward` name (it wraps the call
+# in a Router-R1-style `(score + format_score) * (1-α) + cost_bonus * α`
+# combine). We've moved to terminal-only reward (no format penalty), so
+# wire in a no-op that always returns 0 so downstream math collapses to
+# `score * (1-α) + cost_bonus * α` — which is exactly our reward rule.
+main_ppo_module.format_reward = lambda completion: 0.0
 
 
 # ── Patch 2: LLMGenerationManager ──────────────────────────────────────

@@ -350,9 +350,9 @@ Two interchangeable RL drivers are shipped for ablation:
 - format invalid → 0.0
 - valid mid-step → 0.0
 - terminal & wrong → 0.0
-- terminal & correct → $(1-\alpha)\cdot 1 + \alpha\cdot(1 - c/c_{\max})$, $\alpha=0.1$, $c_{\max}=\$0.30$ per episode.
+- terminal & correct → $(1-\alpha)\cdot 1 + \alpha\cdot R_{\text{cost}}$, $\alpha=0.1$. $R_{\text{cost}}\in[0,1]$ is the rolling-percentile normalised cost reward (Router-R1 style): $R_{\text{cost}} = 1 - \mathrm{clip}\!\big((\sqrt{c} - p_{5}) / (p_{95}-p_{5}),\,0,\,1\big)$ over a 1000-episode rolling buffer, so a single Opus outlier can't saturate the signal and no budget-cap magic number needs tuning.
 
-Worker calls go through the **xiaojingai proxy**, which serves each of the 10 closed-vocabulary model names with authentic frontier pricing. Token usage is read from the API response for cost accounting; per-model `max_tokens` caps bound the episodic cost; `MAX_EPISODE_COST` early-terminates any episode that exceeds budget.
+Worker calls go through the **xiaojingai proxy**, which serves each of the 10 closed-vocabulary model names with authentic frontier pricing. Token usage is read from the API response for cost accounting; per-model `max_tokens` caps bound the episodic cost; a hard per-episode USD ceiling early-terminates any runaway rollout.
 
 ## 🥦 Error Taxonomy
 
