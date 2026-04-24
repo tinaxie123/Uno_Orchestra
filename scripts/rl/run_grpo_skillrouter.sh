@@ -1,29 +1,13 @@
-#!/usr/bin/env bash
-# GRPO training for SkillRouter via Router-R1-style rollout (path B).
-#
-# Runs the same data + warm-start checkpoint as the GiGPO path
-# (run_skillrouter.sh in verl-agent), but swaps the rollout driver from
-# verl-agent's env_manager to SkillRouterGenerationManager — the generate→
-# splice-obs→generate loop from Router-R1. Used for a head-to-head
-# comparison against the GiGPO run.
-#
-# Usage:
-#   CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/rl/run_grpo_skillrouter.sh
 set -x
 
 ENGINE=${1:-vllm}
-
-# --- Data (same parquets GiGPO is training on) ---
 TRAIN_DATA="${TRAIN_DATA:-/data/xieht/verl-agent/data/skillrouter/train.parquet}"
 VAL_DATA="${VAL_DATA:-/data/xieht/verl-agent/data/skillrouter/val.parquet}"
-
-# --- Warm-start SFT ckpt (local) ---
 MODEL_PATH="${MODEL_PATH:-/data/xieht/LlamaFactory/outputs/router_qwen25_7b_sft}"
 
-# --- GRPO ---
-group_size=8                 # reduce all-zero group rate: ~77% @ 5 → ~66% @ 8
-max_turns=5                  # match max_env_steps=5 from path A
-alpha_init=0.1               # R = (1-α) correctness + α cost_reward
+group_size=8                
+max_turns=5                 
+alpha_init=0.1              
 train_batch_size=64
 ppo_mini_batch_size=32
 ppo_micro_batch_size=2
@@ -33,17 +17,12 @@ max_start_length=2048
 max_obs_length=512
 total_training_steps=200
 
-# --- Env ---
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export HYDRA_FULL_ERROR=1
 export SKILLROUTER_SYSTEM_PROMPT=/data/xieht/multiagentRL/data/sft/hf_release/system_prompt.txt
-# Worker API — xiaojingai proxy serves the real models (claude/gpt/gemini/kimi)
 export REMOTE_API_BASE="${REMOTE_API_BASE:-https://open.xiaojingai.com/v1/}"
 export REMOTE_API_KEY="${REMOTE_API_KEY:-sk-wFh8h2dhytX3J7ywOZld4IVWoEoBr8hZ8DonD60UYHDZSrYT}"
-# So both Router-R1 and verl-agent are importable by the launcher;
-# ordering matters — put verl-agent FIRST so `import verl` resolves to
-# the verl-agent copy (which has prime_code + our skillrouter env).
-export PYTHONPATH="/data/xieht/verl-agent:/data/xieht/Router-R1:${PYTHONPATH}"
+export PYTHONPATH="/data/xieht/Router-R1:/data/xieht/verl-agent:${PYTHONPATH}"
 
 PY=/data/conda/envs/verl/bin/python
 

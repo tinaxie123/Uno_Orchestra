@@ -1,28 +1,14 @@
-"""
-Launch GRPO training with SkillRouter multi-turn generation + reward.
-
-Patches Router-R1's vendored verl to use:
-  1. SkillRouterGenerationManager  — multi-turn rollout with real worker API calls
-  2. SkillRouterRewardManager      — per-source verifiers + cost reward
-  3. DataProto.pop                 — additionally copies ``env_kwargs`` onto the
-                                     popped ``gen_batch`` so the generation
-                                     manager can retrieve each sample's
-                                     ``question`` for worker prompts.
-
-Invocation shape:
-    cd /data/xieht/Router-R1 && python /.../launch_grpo.py [hydra overrides...]
-"""
 import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# verl-agent ships the env + verifiers we import.
 if "/data/xieht/verl-agent" not in sys.path:
     sys.path.insert(0, "/data/xieht/verl-agent")
+if "/data/xieht/Router-R1" not in sys.path:
+    sys.path.insert(0, "/data/xieht/Router-R1")
 
-# ── Patch 1: RewardManager ──────────────────────────────────────────────
 import verl.trainer.main_ppo as main_ppo_module
 from reward_manager import (
     SkillRouterRewardManager,
@@ -32,15 +18,7 @@ from reward_manager import (
 main_ppo_module.RewardManager = SkillRouterRewardManager
 main_ppo_module.normalize_reward = normalize_cost
 main_ppo_module.route_count = route_count
-# Router-R1's main_ppo expects a `format_reward` name (it wraps the call
-# in a Router-R1-style `(score + format_score) * (1-α) + cost_bonus * α`
-# combine). We've moved to terminal-only reward (no format penalty), so
-# wire in a no-op that always returns 0 so downstream math collapses to
-# `score * (1-α) + cost_bonus * α` — which is exactly our reward rule.
 main_ppo_module.format_reward = lambda completion: 0.0
-
-
-# ── Patch 2: LLMGenerationManager ──────────────────────────────────────
 from skillrouter_generation import GenerationConfig, SkillRouterGenerationManager
 import router_r1.llm_agent.generation as gen_module
 gen_module.LLMGenerationManager = SkillRouterGenerationManager
@@ -49,14 +27,6 @@ gen_module.GenerationConfig = GenerationConfig
 import verl.trainer.ppo.ray_trainer as ray_trainer_module
 ray_trainer_module.LLMGenerationManager = SkillRouterGenerationManager
 ray_trainer_module.GenerationConfig = GenerationConfig
-
-
-# ── Patch 3: DataProto.pop forwards env_kwargs ─────────────────────────
-# Router-R1's trainer calls `batch.pop(batch_keys=['input_ids',
-# 'attention_mask', 'position_ids'])` to extract the tensor inputs.
-# That drops non_tensor fields like `env_kwargs`, so our generation
-# manager can't look up each sample's `question`.  Wrap pop to COPY
-# (not move) env_kwargs over to the returned gen_batch.
 import verl.protocol as _protocol
 _orig_pop = _protocol.DataProto.pop
 
