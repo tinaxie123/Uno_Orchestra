@@ -8,7 +8,7 @@
 # comparison against the GiGPO run.
 #
 # Usage:
-#   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash scripts/rl/run_grpo_skillrouter.sh
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/rl/run_grpo_skillrouter.sh
 set -x
 
 ENGINE=${1:-vllm}
@@ -18,7 +18,7 @@ TRAIN_DATA="${TRAIN_DATA:-/data/xieht/verl-agent/data/skillrouter/train.parquet}
 VAL_DATA="${VAL_DATA:-/data/xieht/verl-agent/data/skillrouter/val.parquet}"
 
 # --- Warm-start SFT ckpt (local) ---
-MODEL_PATH="${MODEL_PATH:-/data/xieht/LlamaFactory/outputs/router_qwen25_7b_sft_v4}"
+MODEL_PATH="${MODEL_PATH:-/data/xieht/LlamaFactory/outputs/router_qwen25_7b_sft}"
 
 # --- GRPO ---
 group_size=8                 # reduce all-zero group rate: ~77% @ 5 → ~66% @ 8
@@ -36,7 +36,7 @@ total_training_steps=200
 # --- Env ---
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export HYDRA_FULL_ERROR=1
-export SKILLROUTER_SYSTEM_PROMPT=/home/xieht/data/sft/system_prompt.txt
+export SKILLROUTER_SYSTEM_PROMPT=/data/xieht/multiagentRL/data/sft/hf_release/system_prompt.txt
 # Worker API — xiaojingai proxy serves the real models (claude/gpt/gemini/kimi)
 export REMOTE_API_BASE="${REMOTE_API_BASE:-https://open.xiaojingai.com/v1/}"
 export REMOTE_API_KEY="${REMOTE_API_KEY:-sk-wFh8h2dhytX3J7ywOZld4IVWoEoBr8hZ8DonD60UYHDZSrYT}"
@@ -78,7 +78,7 @@ cd /data/xieht/Router-R1 && $PY /data/xieht/multiagentRL/scripts/rl/launch_grpo.
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.top_p=1.0 \
@@ -99,8 +99,8 @@ cd /data/xieht/Router-R1 && $PY /data/xieht/multiagentRL/scripts/rl/launch_grpo.
     ++reward_metric=f1 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='skillrouter-rl' \
-    trainer.experiment_name="grpo_qwen25_7b_sft_ckpt678_8gpu" \
-    trainer.n_gpus_per_node=8 \
+    trainer.experiment_name="grpo_qwen25_7b_sft_4gpu" \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
     trainer.test_freq=50 \
