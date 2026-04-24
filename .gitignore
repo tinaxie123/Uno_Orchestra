@@ -25,10 +25,19 @@
 !eval_pipeline/
 !eval_pipeline/**
 
-# Keep data configs (not actual data files).
+# Keep the vendored verl RL framework.
+# Pinned to upstream Bytedance github.com/verl-project/verl.git, tag v0.7.0
+# (commit f9c855f7cf04d603c9546bc01776c74806a879c1), Apache-2.0. Tree flattened
+# (no nested .git); the importable Python package lives at verl/verl/.
+!verl/
+!verl/**
+
+# Keep data configs and RL training data.
 !data/
 !data/*.yaml
 !data/*.md
+!data/rl/
+!data/rl/**
 
 # macOS / editor noise
 .DS_Store
