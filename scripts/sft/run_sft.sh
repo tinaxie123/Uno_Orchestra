@@ -1,5 +1,5 @@
 #!/bin/bash
-# SFT launcher for SkillRouter (Qwen2.5-7B-Instruct, full FT, ZeRO-2, 2 epochs).
+# SFT launcher for SkillRouter (Qwen2.5-7B-Instruct, full FT, ZeRO-3, 2 epochs).
 #
 # Trains the single-policy hierarchical router described in the README
 # (§🍏 Hierarchical SFT): Stage 1 <plan> + Stage 2 <route> are emitted in the same
@@ -25,6 +25,14 @@
 #   - gradient_checkpointing=true to keep activations in check at 16k seq len.
 #   - packing=true folds short samples together so cutoff_len ~= pack size,
 #     not per-sample length.
+#   - DeepSpeed ZeRO-3 (not ZeRO-2): on 4× H100 80GB, ZeRO-2 OOMs at the first
+#     backward step (per-rank ~70 GB used, ~9 GB needed at backward). ZeRO-3
+#     partitions the weights as well so each rank holds ~1/4 of the 7B model;
+#     with cutoff_len=16384 + gradient_checkpointing it fits at ~79 GB/rank.
+#     The ds_z3_config.json path is set in router_sft_qwen25_7b.yaml.
+#
+# Reference run: 4× H100 (GPUs 0,1,2,3), 246 steps, ~6h14m wall-clock,
+# train_loss 0.5875, eval_loss 0.2427.
 
 set -euo pipefail
 

@@ -152,7 +152,7 @@ HuggingFace Datasets (31 sources, 10 domains)
         ▼
 [3] SFT Training (LlamaFactory, 4×H100)     Fine-tune Qwen2.5-7B-Instruct
         │                - ShareGPT multi-turn, mask non-assistant turns
-        │                - 2 epochs, lr=2e-5, DeepSpeed ZeRO-2, packing on
+        │                - 2 epochs, lr=2e-5, DeepSpeed ZeRO-3, packing on
         ▼
 [4] RL Training (verl-agent, GiGPO / GRPO)  Cost-aware reinforcement learning
         │                - Real worker-API calls via the xiaojingai proxy
@@ -263,9 +263,10 @@ Checks: schema validation, message structure, obs quality, gold match, duplicate
 
 **Config.**
 - Base: Qwen2.5-7B-Instruct, full FT
-- DeepSpeed ZeRO-2, bf16, packing on, cutoff 8,192
+- DeepSpeed ZeRO-3, bf16, packing on, cutoff 16,384
 - 2 epochs, lr 2e-5, cosine, warmup 100 steps
 - Effective batch 128 (4 × per_dev 1 × grad_accum 32)
+- Reference run on 4× H100 80GB: 246 steps, ~6h14m, train_loss 0.5875, eval_loss 0.2427 (1% holdout). Launch via `bash scripts/sft/run_sft.sh`. ZeRO-3 (not ZeRO-2) is required at this seq-len on 4 GPUs — ZeRO-2 OOMs at the first backward.
 
 #### 🍏 Hierarchical SFT — Methodology
 
@@ -277,7 +278,7 @@ $$
 
 where $q$ is the user question, $a_t^{\star}$ is an expert Orchestrator action at step $t$, and $o_t$ is the observation returned by the dispatched workers. 61,201 such trajectories make up the training corpus.
 
-Every Orchestrator action is a **two-stage decision** — **Stage 1 (decomposition)**: emit a plan commitment $P_t$ consisting of a set of subtasks with `depends_on` DAG edges; **Stage 2 (routing)**: for each subtask in $P_t$, emit a routing commitment $r_{t,k}$ that dispatches it to a $(\text{worker model},\, \text{skill})$ pair. At the final step the action is a single Finish($y$) emission. Both stages are serialised into the **same** `assistant` turn under a fixed XML grammar (`<plan>…</plan>` for Stage 1, `<route …>…</route>` for each Stage 2 commitment), interleaved with `observation` turns carrying the worker returns $o_t$. We train one policy $\pi_\theta$ (Qwen2.5-7B-Instruct, full FT, DeepSpeed ZeRO-2, 2 epochs, lr 2e-5, effective batch 128) on this corpus under the standard causal-LM next-token objective — **both stages share the same parameters and are optimised jointly in one backward pass**.
+Every Orchestrator action is a **two-stage decision** — **Stage 1 (decomposition)**: emit a plan commitment $P_t$ consisting of a set of subtasks with `depends_on` DAG edges; **Stage 2 (routing)**: for each subtask in $P_t$, emit a routing commitment $r_{t,k}$ that dispatches it to a $(\text{worker model},\, \text{skill})$ pair. At the final step the action is a single Finish($y$) emission. Both stages are serialised into the **same** `assistant` turn under a fixed XML grammar (`<plan>…</plan>` for Stage 1, `<route …>…</route>` for each Stage 2 commitment), interleaved with `observation` turns carrying the worker returns $o_t$. We train one policy $\pi_\theta$ (Qwen2.5-7B-Instruct, full FT, DeepSpeed ZeRO-3, 2 epochs, lr 2e-5, effective batch 128) on this corpus under the standard causal-LM next-token objective — **both stages share the same parameters and are optimised jointly in one backward pass**.
 
 **Token-level loss mask.** Every token of every `assistant` turn is a prediction target and contributes to the loss. Every token of every `observation` turn is masked out via `observation_tag: observation` in the LlamaFactory yaml: observations are environment signals, not policy outputs, and must not carry gradient into $\theta$. The system prompt and the user question are masked by default, as in any instruction-tuning recipe. No custom loss-splitting, auxiliary head, or per-action weighting is introduced.
 
