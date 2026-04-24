@@ -46,8 +46,11 @@ echo "[run_sft] log=$LOG"
 
 cd "$LF_DIR"
 
+mkdir -p /data/xieht/tmp_sft
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 PYTHONPATH="$LF_DIR/src" \
+TMPDIR=/data/xieht/tmp_sft \
+HF_DATASETS_CACHE=/data/xieht/tmp_sft/hf_datasets \
 WANDB_PROJECT=skillrouter-sft \
 nohup "$VENV_PY/torchrun" \
     --nnodes 1 --node_rank 0 --nproc_per_node "$NPROC" \
