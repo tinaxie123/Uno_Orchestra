@@ -1,0 +1,234 @@
+"""SkillRouter agent loop — schema v1.1 multi-turn router rollout.
+
+Minimum-viable AgentLoopBase subclass for upstream verl v0.7. Registers
+under `@register("skillrouter")` so a side-effect import
+(`import scripts.rl.skillrouter_rollout`) is enough for the trainer's
+agent-loop registry to pick it up.
+
+Per-episode loop (schema v1.1):
+    1. policy emits `<plan round=N>` + one or more
+       `<route ...>...</route>` blocks  (response_mask = 1)
+    2. env.step dispatches each route to the real worker LLM via
+       xiaojingai and replies with `<obs subtask=K>...</obs>` blocks,
+       which we inject as a `user` turn                 (response_mask = 0)
+    3. policy reads obs, emits `<verify>` and either
+         (a) another `<plan ...>` — loop to step 1, OR
+         (b) `<final_answer>...</final_answer>`         — terminal
+
+Terminal-reward position convention (contract with the reward manager):
+    the env composes R = (1-α)·R_outcome + α·R_cost on the step that
+    flips `done=True` and we surface that scalar in
+    `AgentLoopOutput.extra_fields["env_terminal_reward"]`. The reward
+    manager (SkillRouterRewardManager, follow-up commit) writes this
+    scalar onto the **last token index where response_mask == 1** —
+    i.e. the last policy-generated token of the trajectory. This is
+    the same convention verl.trainer uses for other outcome-only RMs.
+
+Known v1 simplifications (to be revisited in follow-up commits):
+- α is hard-coded at 0.1 (matches SkillRouterMultiProcessEnv default).
+- Observations are wrapped as a `user` chat turn + re-applied template
+  (matches upstream ToolAgentLoop). Whether the SFT fixtures used the
+  exact same framing is the subject of the byte-identity test.
+- No logprobs, no multimodal, no per-turn reward signal.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+from uuid import uuid4
+
+from transformers import AutoProcessor, AutoTokenizer
+
+from verl.experimental.agent_loop.agent_loop import (
+    AgentLoopBase,
+    AgentLoopOutput,
+    AsyncLLMServerManager,
+    DictConfigWrap,
+    register,
+)
+from verl.utils.profiler import simple_timer
+from verl.utils.rollout_trace import rollout_trace_op
+
+from agent_system.environments.env_package.skillrouter.envs import (
+    SingleSkillRouterEnv,
+    _rolling_percentile_cost_reward,
+)
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+# Default α for the (1-α)·outcome + α·cost blend. Matches
+# SkillRouterMultiProcessEnv's default so the composed terminal reward
+# is continuous with runs produced under the old rollout. Overridable
+# from Hydra via `actor_rollout_ref.rollout.multi_turn.alpha=<float>`.
+_DEFAULT_ALPHA = 0.1
+
+
+@register("skillrouter")
+class SkillRouterAgentLoop(AgentLoopBase):
+    """Schema v1.1 router agent loop."""
+
+    def __init__(
+        self,
+        trainer_config: DictConfigWrap,
+        server_manager: AsyncLLMServerManager,
+        tokenizer: AutoTokenizer,
+        processor: AutoProcessor,
+        **kwargs,
+    ):
+        super().__init__(trainer_config, server_manager, tokenizer, processor, **kwargs)
+        config = trainer_config.config
+        multi_turn = config.actor_rollout_ref.rollout.multi_turn
+        self.max_turns = int(
+            getattr(multi_turn, "max_assistant_turns", None)
+            or multi_turn.get("max_turns", 5)
+        )
+        self.prompt_length = int(config.actor_rollout_ref.rollout.prompt_length)
+        self.response_length = int(config.actor_rollout_ref.rollout.response_length)
+        # Outcome/cost blend weight; see _DEFAULT_ALPHA for rationale.
+        self.alpha = float(multi_turn.get("alpha", _DEFAULT_ALPHA))
+
+    @rollout_trace_op
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        messages = list(kwargs["raw_prompt"])
+        extra_info = dict(kwargs.get("extra_info") or {})
+        env_kwargs = dict(extra_info.get("env_kwargs") or {})
+        for key in ("question", "ground_truth", "data_source", "source", "tests"):
+            if key not in env_kwargs and key in extra_info:
+                env_kwargs[key] = extra_info[key]
+        rm = kwargs.get("reward_model") or {}
+        if rm.get("ground_truth") is not None:
+            env_kwargs["ground_truth"] = rm["ground_truth"]
+        env_kwargs.setdefault("data_source", kwargs.get("data_source", "unknown"))
+        env_kwargs.setdefault(
+            "source", env_kwargs.get("source") or env_kwargs["data_source"]
+        )
+        env_kwargs.setdefault("max_turns", self.max_turns)
+        env = SingleSkillRouterEnv()
+        env.reset(env_kwargs)
+        prompt_ids = await self.apply_chat_template(messages)
+        request_id = uuid4().hex
+        metrics: dict[str, Any] = {}
+        response_mask: list[int] = []
+        full_ids: list[int] = list(prompt_ids)
+
+        num_turns = 0
+        n_route_calls = 0
+        n_obs_tokens = 0
+        done_reason = "max_turns"
+        env_terminal_reward = 0.0
+        env_meta_last: dict[str, Any] = {}
+
+        for _turn in range(self.max_turns):
+            with simple_timer("generate_sequences", metrics):
+                gen = await self.server_manager.generate(
+                    request_id=request_id,
+                    prompt_ids=full_ids,
+                    sampling_params=sampling_params,
+                )
+            turn_ids = list(gen.token_ids)
+            if not turn_ids:
+                done_reason = "empty_generation"
+                break
+
+            full_ids.extend(turn_ids)
+            response_mask.extend([1] * len(turn_ids))
+            num_turns += 1
+            if len(response_mask) >= self.response_length:
+                done_reason = "response_length"
+                break
+            turn_text = await self.loop.run_in_executor(
+                None,
+                lambda ids=turn_ids: self.tokenizer.decode(
+                    ids, skip_special_tokens=True
+                ),
+            )
+            step = env.step(turn_text)
+            env_meta_last = step.get("metadata", {}) or {}
+            n_route_calls += int(env_meta_last.get("n_routes", 0))
+
+            if step["done"]:
+                if env_meta_last.get("final_answer") is not None:
+                    done_reason = "lazy" if env_meta_last.get("lazy_mode") else "final"
+                elif env_meta_last.get("format_error"):
+                    done_reason = "format_error"
+                elif env_meta_last.get("timeout"):
+                    done_reason = "timeout"
+                else:
+                    done_reason = "done"
+                env_terminal_reward = _compose_terminal_reward(env, step, self.alpha)
+                break
+            obs_list = step.get("observations") or []
+            if not obs_list:
+                continue
+            obs_content = obs_list[0].get("content", "") or ""
+            if not obs_content:
+                continue
+
+            obs_messages = [{"role": "user", "content": obs_content}]
+            obs_ids = await self.apply_chat_template(
+                obs_messages, remove_system_prompt=True
+            )
+            full_ids.extend(obs_ids)
+            response_mask.extend([0] * len(obs_ids))
+            n_obs_tokens += len(obs_ids)
+
+            if len(response_mask) >= self.response_length:
+                done_reason = "response_length"
+                break
+        if not env.done:
+            env_terminal_reward = 0.0
+            env_meta_last.setdefault("timeout", True)
+            env_meta_last.setdefault("correctness", 0.0)
+        resp_len = min(len(response_mask), self.response_length)
+        prompt_ids_out = full_ids[: len(full_ids) - len(response_mask)]
+        response_ids_out = full_ids[-len(response_mask):][:resp_len] if response_mask else []
+        response_mask_out = response_mask[:resp_len]
+        extra_fields: dict[str, Any] = {
+            "env_terminal_reward": float(env_terminal_reward),
+            "env_correctness": float(env_meta_last.get("correctness", 0.0) or 0.0),
+            "env_api_cost": float(env.total_api_cost),
+            "env_n_route_calls": int(n_route_calls),
+            "env_n_obs_tokens": int(n_obs_tokens),
+            "env_num_turns": int(num_turns),
+            "env_format_valid": bool(env_meta_last.get("format_valid", True)),
+            "done_reason": done_reason,
+            "data_source": env.data_source,
+            "source": env.source,
+        }
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "skillrouter rollout: turns=%d routes=%d obs_tok=%d "
+                "done=%s reward=%.4f cost=%.4g source=%s",
+                num_turns, n_route_calls, n_obs_tokens,
+                done_reason, env_terminal_reward, env.total_api_cost, env.source,
+            )
+
+        return AgentLoopOutput(
+            prompt_ids=prompt_ids_out,
+            response_ids=response_ids_out,
+            response_mask=response_mask_out,
+            num_turns=num_turns,
+            metrics=metrics,
+            extra_fields=extra_fields,
+        )
+
+
+def _compose_terminal_reward(
+    env: SingleSkillRouterEnv, step: dict, alpha: float
+) -> float:
+    """Reproduce SkillRouterMultiProcessEnv's terminal reward rule for one env.
+
+        mid-step                 → 0.0
+        terminal, answer wrong   → 0.0   (includes malformed output)
+        terminal, answer correct → (1-α)·1 + α·(1 - cost/rolling-hi)
+
+    Kept here because the agent loop runs per-sample without the vector
+    env wrapper that owns that blending in the old stack.
+    """
+    correctness = float(step.get("reward", 0.0) or 0.0)
+    if correctness <= 0:
+        return 0.0
+    r_cost = _rolling_percentile_cost_reward(env.total_api_cost)
+    return (1.0 - alpha) * correctness + alpha * r_cost
