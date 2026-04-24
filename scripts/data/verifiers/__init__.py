@@ -3,7 +3,14 @@ from __future__ import annotations
 from scripts.data.verifiers.math_verifier import verify_math
 from scripts.data.verifiers.qa_verifier import verify_qa
 from scripts.data.verifiers.code_verifier import verify_code
-from scripts.data.verifiers.toolace_verifier import verify_toolace
+from scripts.data.verifiers.toolace_call_verifier import verify_toolace as _verify_toolace_bfcl
+
+
+def verify_toolace(pred: str, gold: str) -> bool:
+    # Binary adapter for the boolean `VERIFIERS` registry. Training /
+    # reward paths that want the float score should import from
+    # `toolace_call_verifier` directly.
+    return _verify_toolace_bfcl(pred, gold, strict=True) >= 1.0
 
 VERIFIERS: dict[str, callable] = {
     "gsm8k": verify_math,

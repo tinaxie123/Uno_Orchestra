@@ -8,6 +8,19 @@ BFCL protocol (Berkeley Function-Calling Leaderboard):
   - Scoring: BINARY (1.0 or 0.0), no partial credit
   - Supports simple, multiple, parallel, parallel_multiple
 
+Beyond the JSON / Python-call formats BFCL canonicalises, ToolACE's own
+training set stores gold answers in two non-standard wrappers:
+
+  - bracket-dash: `[Fn-["k1"-v1;"k2"-v2], Fn2-["k"-v]]`
+  - angle-pipe:   `<Fn|<k1|v1,k2|v2>, Fn2|<k|v>>`
+
+These are the formats the prompt instructs the model to emit (see
+data/rl/train.parquet toolace rows), so gold and prediction use the
+same shape. We parse them here into {name, arguments} dicts so the
+same AST matcher can score them. Value-level fidelity is weaker than
+JSON (values can contain unescaped commas/dashes/pipes) — see
+`_parse_toolace_*` for the trade-offs.
+
 For RL reward, we use:
   - strict mode (default): binary, aligned with BFCL
   - lenient mode: partial credit for name-only match (for early RL warm-up)
@@ -87,13 +100,103 @@ def _parse_func_calls(text: str) -> list[dict[str, Any]] | None:
     if calls:
         return calls
 
-    # Format 2: FuncName(key="val", key2=val2) — ToolACE native
+    # Format 2: FuncName(key="val", key2=val2) — Python-like
     for m in re.finditer(r'([\w.]+)\(([^)]*)\)', text):
         name = m.group(1)
         args_str = m.group(2).strip()
         args = _parse_kwargs(args_str)
         calls.append({"name": name, "arguments": args})
 
+    if calls:
+        return calls
+
+    # Format 3: ToolACE bracket-dash  `[Fn-["k"-v;"k"-v], Fn2-[...]]`
+    tb = _parse_toolace_bracket_dash(text)
+    if tb:
+        return tb
+
+    # Format 4: ToolACE angle-pipe    `<Fn|<k|v,k|v>, Fn2|<...>>`
+    ta = _parse_toolace_angle_pipe(text)
+    if ta:
+        return ta
+
+    return None
+
+
+# ── ToolACE native-format parsers ───────────────────────────────
+#
+# These formats encode argument values without a uniform quoting rule
+# (lists, scalars, and quoted strings all coexist). We recover function
+# names and the SET of argument keys robustly; argument values are kept
+# as raw strings and normalised downstream. This means value-level
+# equality under these formats is weaker than for JSON gold — good
+# enough for the lenient RL reward, not a substitute for a proper BFCL
+# AST at eval time.
+
+_TOOLACE_BRACKET_FN_RE = re.compile(r'([A-Za-z_][\w\-]*)\s*-\s*\[')
+_TOOLACE_BRACKET_KV_RE = re.compile(r'"([^"]+)"\s*-\s*([^;\]]+?)(?=\s*;|\s*\])')
+_TOOLACE_ANGLE_FN_RE   = re.compile(r'([A-Za-z_][\w\- ]*?)\s*\|\s*<')
+_TOOLACE_ANGLE_KV_RE   = re.compile(r"([A-Za-z_][\w\- ]*?)\s*\|\s*('(?:[^']*)'|\"(?:[^\"]*)\"|[^,<>]+)")
+
+
+def _parse_toolace_bracket_dash(text: str) -> list[dict[str, Any]] | None:
+    """Parse ToolACE's `[Fn-["k"-v;"k"-v], ...]` wire format.
+
+    We locate each `Fn-[` anchor, then scan forward with bracket-depth
+    tracking to find the matching `]`. Inside the args block, keys
+    appear as `"key"-value` separated by `;` (with trailing `]`).
+    """
+    anchors = list(_TOOLACE_BRACKET_FN_RE.finditer(text))
+    if not anchors:
+        return None
+    calls: list[dict[str, Any]] = []
+    for m in anchors:
+        name = m.group(1)
+        # Walk from the opening `[` to its match.
+        start = m.end() - 1
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            if text[i] == '[':
+                depth += 1
+            elif text[i] == ']':
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        body = text[start + 1:end]
+        args: dict[str, Any] = {}
+        for km in _TOOLACE_BRACKET_KV_RE.finditer(body):
+            args[km.group(1)] = km.group(2).strip()
+        calls.append({"name": name, "arguments": args})
+    return calls if calls else None
+
+
+def _parse_toolace_angle_pipe(text: str) -> list[dict[str, Any]] | None:
+    """Parse ToolACE's `<Fn|<k|v,k|v>, ...>` wire format."""
+    anchors = list(_TOOLACE_ANGLE_FN_RE.finditer(text))
+    if not anchors:
+        return None
+    calls: list[dict[str, Any]] = []
+    for m in anchors:
+        name = m.group(1).strip()
+        # Walk from the opening `<` of the arg block to its match.
+        start = m.end() - 1
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            if text[i] == '<':
+                depth += 1
+            elif text[i] == '>':
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        body = text[start + 1:end]
+        args: dict[str, Any] = {}
+        for km in _TOOLACE_ANGLE_KV_RE.finditer(body):
+            args[km.group(1).strip()] = km.group(2).strip().strip("'\"")
+        calls.append({"name": name, "arguments": args})
     return calls if calls else None
 
 
@@ -127,6 +230,13 @@ def _parse_kwargs(args_str: str) -> dict[str, Any]:
     return args
 
 
+_REFUSAL_PATTERNS = (
+    "don't have", "do not have", "cannot", "can't", "not available",
+    "unable to", "no access", "not capable", "not provided",
+    "please provide", "could you provide", "need more", "insufficient",
+)
+
+
 def _normalize_value(v: Any) -> str:
     """Normalize a parameter value for comparison."""
     if isinstance(v, bool):
@@ -145,9 +255,15 @@ def _calls_match(pred_call: dict, gold_call: dict) -> bool:
       2. All gold argument keys present in pred
       3. All argument values match (normalized string comparison)
     """
+    # Defensive: some parser paths (free-text JSON recovery) can yield
+    # a dict/None in `name` when the source is malformed. Treat those
+    # as non-matching rather than crashing the reward loop mid-batch.
+    pn, gn = pred_call.get("name"), gold_call.get("name")
+    if not isinstance(pn, str) or not isinstance(gn, str):
+        return False
     # Function name match
-    pred_name = pred_call["name"].lower().replace("_", "").replace("-", "").replace(".", "")
-    gold_name = gold_call["name"].lower().replace("_", "").replace("-", "").replace(".", "")
+    pred_name = pn.lower().replace("_", "").replace("-", "").replace(".", "")
+    gold_name = gn.lower().replace("_", "").replace("-", "").replace(".", "")
     if pred_name != gold_name:
         return False
 
@@ -194,8 +310,25 @@ def verify_toolace(pred: str, gold: str, strict: bool = True) -> float:
     pred_calls = _parse_func_calls(pred)
 
     if not gold_calls:
-        # Gold is not a function call — text comparison
-        if _normalize_value(pred).lower() == _normalize_value(gold).lower():
+        # Gold is natural-language (refusal / clarification request).
+        # Strict string equality is far too harsh for free-text — 76% of
+        # our ToolACE training pool lands here. Fall through a ladder:
+        #   1) exact normalised match
+        #   2) gold is a short substring of pred (covers "Please provide
+        #      your X" style clarifications restated verbatim by the model)
+        #   3) both sides are refusals (shared intent even if wording
+        #      diverges) — routed through `_REFUSAL_PATTERNS`.
+        g = _normalize_value(gold).lower()
+        p = _normalize_value(pred).lower()
+        if not p:
+            return 0.0
+        if g == p:
+            return 1.0
+        if len(g) > 4 and g in p:
+            return 1.0
+        g_ref = any(pat in g for pat in _REFUSAL_PATTERNS)
+        p_ref = any(pat in p for pat in _REFUSAL_PATTERNS)
+        if g_ref and p_ref:
             return 1.0
         return 0.0
 

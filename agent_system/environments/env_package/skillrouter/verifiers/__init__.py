@@ -3,7 +3,13 @@ from __future__ import annotations
 from .math_verifier import verify_math
 from .qa_verifier import verify_qa
 from .code_verifier import verify_code
-from .toolace_verifier import verify_toolace
+# Single source of truth for ToolACE scoring lives under
+# scripts/data/verifiers/. Repo root is on PYTHONPATH at train time.
+from scripts.data.verifiers.toolace_call_verifier import verify_toolace as _verify_toolace_bfcl
+
+
+def verify_toolace(pred: str, gold: str) -> bool:
+    return _verify_toolace_bfcl(pred, gold, strict=True) >= 1.0
 
 VERIFIERS: dict[str, callable] = {
     "gsm8k": verify_math,
