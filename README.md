@@ -1,4 +1,4 @@
-# SkillRouter
+# Uno-Orchestra
 
 Hierarchical-delegation router that decomposes a task into subtasks and routes each to a `(worker model, skill)` pair, trained with SFT + cost-aware RL.
 
