@@ -22,8 +22,8 @@ A router must learn **when** and **how** to decompose a task. According to the c
 
 
 We select a minimal set of sources such that each of the four dimensions is covered by at least one dataset, and every source contributes a decomposition pattern not provided by the others. Starting from an initial pool of 8 widely-used datasets spanning 4 domains, we apply two inclusion criteria to ensure each source provides meaningful signal for router training:
-(i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model, and multi-step tasks where it must decompose the problem into dependent sub-tasks;
-(ii) gold answers must be automatically verifiable to enable scalable filtering;
+**(i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model, and multi-step tasks where it must decompose the problem into dependent sub-tasks;
+(ii) gold answers must be automatically verifiable to enable scalable filtering;**
 
 Sources:
 
