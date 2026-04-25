@@ -1,5 +1,5 @@
 """
-SkillRouter SFT adapter: <plan> → <route> → <obs> → <verify> → <final_answer>
+Uno SFT adapter: <plan> → <route> → <obs> → <verify> → <final_answer>
 Uses schema v1.1 with real API sub-agent calls (same as RL training env).
 """
 import re
@@ -36,11 +36,11 @@ VERIFY_RE = re.compile(r'<verify round="(\d+)" status="([^"]+)"', re.DOTALL)
 SYSTEM_PROMPT_PATH = "/home/xieht/data/sft/system_prompt.txt"
 
 
-class SkillRouterSFT(BaseRouter):
-    """SkillRouter SFT checkpoint — learned routing with decomposition, no RL."""
+class UnoSFT(BaseRouter):
+    """Uno SFT checkpoint — learned routing with decomposition, no RL."""
 
     def __init__(self, local_base=DEFAULT_LOCAL_BASE, api_base=DEFAULT_API_BASE,
-                 api_key="EMPTY", model_name="SkillRouter-SFT",
+                 api_key="EMPTY", model_name="Uno-SFT",
                  max_rounds=3, system_prompt=None):
         self.local = openai.OpenAI(base_url=local_base, api_key="EMPTY")
         self.api = openai.OpenAI(base_url=api_base, api_key=api_key)
@@ -58,7 +58,7 @@ class SkillRouterSFT(BaseRouter):
 
     @property
     def name(self):
-        return "SkillRouter-SFT"
+        return "Uno-SFT"
 
     def _call_sub_agent(self, model: str, skill: str, query: str, question: str):
         """Call real API as sub-agent, same as envs.py."""

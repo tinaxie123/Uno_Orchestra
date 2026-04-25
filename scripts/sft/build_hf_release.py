@@ -1,5 +1,5 @@
 """
-Build the HuggingFace dataset release layout for SkillRouter-Curriculum.
+Build the HuggingFace dataset release layout for Uno-Curriculum.
 
 Output layout (under ``data/sft/hf_release/``):
 
@@ -240,7 +240,7 @@ configs:
 ---
 """
 
-    body = f"""# SkillRouter Curriculum
+    body = f"""# Uno Curriculum
 
 Training curriculum for a hierarchical-delegation router: a small language
 model that decomposes a task into subtasks and routes each subtask to a
@@ -261,8 +261,8 @@ knowledge composition, tool orchestration).
 ```python
 from datasets import load_dataset
 
-sft = load_dataset("tinaxie123/SkillRouter-Curriculum", "sft", split="train")
-rl  = load_dataset("tinaxie123/SkillRouter-Curriculum", "rl",  split="train")
+sft = load_dataset("tinaxie123/Uno-Curriculum", "sft", split="train")
+rl  = load_dataset("tinaxie123/Uno-Curriculum", "rl",  split="train")
 ```
 
 ## Config: `sft` ({len(sft_rows):,} trajectories)

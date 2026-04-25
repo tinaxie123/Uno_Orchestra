@@ -261,7 +261,7 @@ Checks: schema validation, message structure, obs quality, gold match, duplicate
 
 ### 🥝 Step 3: SFT Training
 
-**Data.** The 61,201 trajectories produced by the pipeline above are released as the `sft_full` split of [tinaxie/SkillRouter-Curriculum](https://huggingface.co/datasets/tinaxie/SkillRouter-Curriculum) on Hugging Face.
+**Data.** The 61,201 trajectories produced by the pipeline above are released as the `sft_full` split of [tinaxie/Uno-Curriculum](https://huggingface.co/datasets/tinaxie/Uno-Curriculum) on Hugging Face.
 
 **Config.**
 - Base: Qwen2.5-7B-Instruct, full FT
@@ -344,16 +344,15 @@ trainer.train(); trainer.save_model("/home/xieht/data/sft/router_final")
 
 ### 🥥 Step 4: RL Training (`scripts/rl/`)
 
-Two interchangeable RL drivers are shipped for ablation:
+**Driver — GRPO.** The launcher + multi-turn generation manager live under `scripts/rl/` (undergoing a rewrite against vllm 0.11.x; see `verl/third_party/vllm/vllm_v_0_11_0/` and the step-gated smoke in `scripts/rl/smoke_vllm_step1.py`). The generation manager splices `<obs>` content inline via chat-template role switches, keeping the RL-time token stream byte-identical to SFT.
 
-- **Path A — GiGPO** (`scripts/rl/run_gigpo_skillrouter.sh`). verl-agent environment manager; each `env.step()` is a complete LLM.generate + parse + worker dispatch cycle; state-level GiGPO with step-level advantage.
-- **Path B — GRPO** (`scripts/rl/run_grpo_skillrouter.sh`, `scripts/rl/launch_grpo.py`). Custom `SkillRouterGenerationManager` (drop-in replacement for Router-R1's `LLMGenerationManager`) splices `<obs>` content inline via chat-template role switches, keeping the RL-time token stream byte-identical to SFT.
+**Rollout structure.** The router operates as an iterative delegator. At each turn it may emit a batch of parallel subtasks together with an explicit `(model, skill)` choice per subtask; worker responses are returned synchronously via an `<obs>` block and the router autoregressively decides, on the next turn, whether to issue another round of delegation or terminate with a final answer. Workers are treated as stateless oracles rather than learnable sub-agents — this keeps credit assignment tractable under group-relative policy optimisation while preserving the wide-parallel-with-feedback structure that motivates hierarchical routing.
 
 **Reward** — terminal only:
 - format invalid → 0.0
 - valid mid-step → 0.0
 - terminal & wrong → 0.0
-- terminal & correct → $(1-\alpha)\cdot 1 + \alpha\cdot R_{\text{cost}}$, $\alpha=0.1$. $R_{\text{cost}}\in[0,1]$ is the rolling-percentile normalised cost reward (Router-R1 style): $R_{\text{cost}} = 1 - \mathrm{clip}\!\big((\sqrt{c} - p_{5}) / (p_{95}-p_{5}),\,0,\,1\big)$ over a 1000-episode rolling buffer, so a single Opus outlier can't saturate the signal and no budget-cap magic number needs tuning.
+- terminal & correct → $(1-\alpha)\cdot 1 + \alpha\cdot R_{\text{cost}}$, $\alpha=0.1$. $R_{\text{cost}}\in[0,1]$ is a rolling-percentile normalised cost reward: $R_{\text{cost}} = 1 - \mathrm{clip}\!\big((\sqrt{c} - p_{5}) / (p_{95}-p_{5}),\,0,\,1\big)$ over a 1000-episode rolling buffer, so a single Opus outlier can't saturate the signal and no budget-cap magic number needs tuning.
 
 Worker calls go through the **xiaojingai proxy**, which serves each of the 10 closed-vocabulary model names with authentic frontier pricing. Token usage is read from the API response for cost accounting; per-model `max_tokens` caps bound the episodic cost; a hard per-episode USD ceiling early-terminates any runaway rollout.
 
@@ -494,7 +493,7 @@ Unified eval pipeline supporting any router on any benchmark:
 ```bash
 python -m eval_pipeline.run --router ROUTER --bench BENCH --api_key KEY
 
-# Routers:    router-r1, skillrouter-sft, skillrouter-rl, direct,
+# Routers:    router-r1, uno-sft, uno-rl, direct,
 #             random, oracle-cheapest, router+claude, oracle-codex
 # Benchmarks: swebench (500 instances), terminalbench (89 tasks),
 #             plus the 7-source held-out RL pool
@@ -514,15 +513,15 @@ Verification uses official methods:
 | Router+Claude | Decomposition only | Our decomposer + frontier executor |
 | Random | Random routing | Uniform over valid pairs |
 | Router-R1 | Prior art | Search/QA-only, no cost reward |
-| **SkillRouter-SFT** | **Learned routing + decomposition** | Our method (SFT only) |
-| **SkillRouter-RL** | **Learned routing + decomposition + RL** | Our full method |
+| **Uno-SFT** | **Learned routing + decomposition** | Our method (SFT only) |
+| **Uno-RL** | **Learned routing + decomposition + RL** | Our full method |
 
 ### Current Progress
 
 | Baseline | SWE-bench (500) | Terminal-Bench (89) |
 |----------|:---:|:---:|
 | Router-R1 | 500 gen, 500 verified | 500 gen, 30/89 verified |
-| SkillRouter-SFT | 500 gen | 89 gen, 17/89 verified |
+| Uno-SFT | 500 gen | 89 gen, 17/89 verified |
 | Direct(Qwen2.5-7B) | 500 gen | 89 gen, 19/89 verified |
 | Direct(GPT-5.4) | 500 gen, 500 verified | 89 gen, 25/89 verified |
 | Oracle-Codex | 500 gen, 500 verified | 89 gen, 16/89 verified |
@@ -556,11 +555,15 @@ multiagentRL/
 
 ```bash
 # Evaluation
-python -m eval_pipeline.run --router skillrouter-sft --bench swebench \
-    --local_base http://localhost:8000/v1 --local_model SkillRouter-SFT --api_key KEY
+python -m eval_pipeline.run --router uno-sft --bench swebench \
+    --local_base http://localhost:8000/v1 --local_model Uno-SFT --api_key KEY
 
 # Training
 python scripts/data/generate_trajectories.py --full --concurrency 200    # Distillation
 bash scripts/sft/run_sft.sh                                              # SFT
-bash scripts/rl/run_gigpo_skillrouter.sh                                 # RL
+bash scripts/rl/run_grpo_uno.sh                                          # RL
 ```
+
+## Acknowledgements
+
+Our training experiments are powered by our heavily modified fork of [verl](https://github.com/volcengine/verl), an open-source RLHF library.

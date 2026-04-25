@@ -1,5 +1,5 @@
 """
-Projection function for SkillRouter.
+Projection function for UNO.
 Maps raw LLM text output to actions the environment can process.
 """
 
@@ -14,7 +14,7 @@ ROUTE_RE = re.compile(
 PLAN_RE = re.compile(r'<plan round="(\d+)">', re.DOTALL)
 
 
-def skillrouter_projection(text_actions: List[str]) -> Tuple[List[str], List[int]]:
+def uno_projection(text_actions: List[str]) -> Tuple[List[str], List[int]]:
     """
     Validate and pass through model outputs.
 

@@ -694,15 +694,15 @@ def make_envs(config):
         envs = AppWorldEnvironmentManager(_envs, projection_f, config)
         val_envs = AppWorldEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
-    elif "skillrouter" in config.env.env_name.lower():
-        from agent_system.environments.env_package.skillrouter import build_skillrouter_envs, skillrouter_projection
-        from agent_system.environments.env_package.skillrouter.env_manager import SkillRouterEnvironmentManager
-        _envs = build_skillrouter_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
-        _val_envs = build_skillrouter_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)
+    elif "uno" in config.env.env_name.lower():
+        from agent_system.environments.env_package.uno import build_uno_envs, uno_projection
+        from agent_system.environments.env_package.uno.env_manager import UnoEnvironmentManager
+        _envs = build_uno_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
+        _val_envs = build_uno_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)
 
-        projection_f = partial(skillrouter_projection)
-        envs = SkillRouterEnvironmentManager(_envs, projection_f, config)
-        val_envs = SkillRouterEnvironmentManager(_val_envs, projection_f, config)
+        projection_f = partial(uno_projection)
+        envs = UnoEnvironmentManager(_envs, projection_f, config)
+        val_envs = UnoEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     else:
         print("Environment not supported")

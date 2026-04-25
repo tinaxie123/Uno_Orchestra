@@ -13,7 +13,7 @@ Two levels of agents, both our own code:
 The planner's view is a chat-completions call with two OpenAI tools:
 ``delegate_task`` and ``submit``. Routers that participate inherit the default
 ``BaseRouter.chat_completions`` (Direct, Oracle, Random) or override it with
-their own orchestration (PlannerRouter / SkillRouterSFT). When the planner
+their own orchestration (PlannerRouter / UnoSFT). When the planner
 calls ``submit`` — or the attempt budget is exhausted — we run the container's
 ``test.sh`` via ``DockerExecutor.run_tests()`` and read the reward file.
 """

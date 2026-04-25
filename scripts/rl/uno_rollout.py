@@ -1,8 +1,8 @@
-"""SkillRouter agent loop — schema v1.1 multi-turn router rollout.
+"""UNO agent loop — schema v1.1 multi-turn router rollout.
 
 Minimum-viable AgentLoopBase subclass for upstream verl v0.7. Registers
-under `@register("skillrouter")` so a side-effect import
-(`import scripts.rl.skillrouter_rollout`) is enough for the trainer's
+under `@register("uno")` so a side-effect import
+(`import scripts.rl.uno_rollout`) is enough for the trainer's
 agent-loop registry to pick it up.
 
 Per-episode loop (schema v1.1):
@@ -19,13 +19,13 @@ Terminal-reward position convention (contract with the reward manager):
     the env composes R = (1-α)·R_outcome + α·R_cost on the step that
     flips `done=True` and we surface that scalar in
     `AgentLoopOutput.extra_fields["env_terminal_reward"]`. The reward
-    manager (SkillRouterRewardManager, follow-up commit) writes this
+    manager (UnoRewardManager, follow-up commit) writes this
     scalar onto the **last token index where response_mask == 1** —
     i.e. the last policy-generated token of the trajectory. This is
     the same convention verl.trainer uses for other outcome-only RMs.
 
 Known v1 simplifications (to be revisited in follow-up commits):
-- α is hard-coded at 0.1 (matches SkillRouterMultiProcessEnv default).
+- α is hard-coded at 0.1 (matches UnoMultiProcessEnv default).
 - Observations are wrapped as a `user` chat turn + re-applied template
   (matches upstream ToolAgentLoop). Whether the SFT fixtures used the
   exact same framing is the subject of the byte-identity test.
@@ -50,8 +50,8 @@ from verl.experimental.agent_loop.agent_loop import (
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 
-from agent_system.environments.env_package.skillrouter.envs import (
-    SingleSkillRouterEnv,
+from agent_system.environments.env_package.uno.envs import (
+    SingleUnoEnv,
     _rolling_percentile_cost_reward,
 )
 
@@ -59,14 +59,14 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 # Default α for the (1-α)·outcome + α·cost blend. Matches
-# SkillRouterMultiProcessEnv's default so the composed terminal reward
+# UnoMultiProcessEnv's default so the composed terminal reward
 # is continuous with runs produced under the old rollout. Overridable
 # from Hydra via `actor_rollout_ref.rollout.multi_turn.alpha=<float>`.
 _DEFAULT_ALPHA = 0.1
 
 
-@register("skillrouter")
-class SkillRouterAgentLoop(AgentLoopBase):
+@register("uno")
+class UnoAgentLoop(AgentLoopBase):
     """Schema v1.1 router agent loop."""
 
     def __init__(
@@ -105,7 +105,7 @@ class SkillRouterAgentLoop(AgentLoopBase):
             "source", env_kwargs.get("source") or env_kwargs["data_source"]
         )
         env_kwargs.setdefault("max_turns", self.max_turns)
-        env = SingleSkillRouterEnv()
+        env = SingleUnoEnv()
         env.reset(env_kwargs)
         prompt_ids = await self.apply_chat_template(messages)
         request_id = uuid4().hex
@@ -199,7 +199,7 @@ class SkillRouterAgentLoop(AgentLoopBase):
         }
         if logger.isEnabledFor(logging.INFO):
             logger.info(
-                "skillrouter rollout: turns=%d routes=%d obs_tok=%d "
+                "uno rollout: turns=%d routes=%d obs_tok=%d "
                 "done=%s reward=%.4f cost=%.4g source=%s",
                 num_turns, n_route_calls, n_obs_tokens,
                 done_reason, env_terminal_reward, env.total_api_cost, env.source,
@@ -216,9 +216,9 @@ class SkillRouterAgentLoop(AgentLoopBase):
 
 
 def _compose_terminal_reward(
-    env: SingleSkillRouterEnv, step: dict, alpha: float
+    env: SingleUnoEnv, step: dict, alpha: float
 ) -> float:
-    """Reproduce SkillRouterMultiProcessEnv's terminal reward rule for one env.
+    """Reproduce UnoMultiProcessEnv's terminal reward rule for one env.
 
         mid-step                 → 0.0
         terminal, answer wrong   → 0.0   (includes malformed output)

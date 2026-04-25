@@ -1,5 +1,5 @@
 """
-SkillRouter Environment for verl-agent.
+UNO Environment for verl-agent.
 
 Each episode:
 1. Model receives a question
@@ -8,7 +8,8 @@ Each episode:
 4. Model generates <verify> + optionally <final_answer> or repair <plan>
 5. Repeat until <final_answer> or max_steps
 
-Reward: Router-R1 style R = (1-α)*R_outcome + α*R_cost
+Reward: R = (1-α)·R_outcome + α·R_cost (outcome ∈ {0,1}, R_cost from
+rolling-percentile winsorisation of sqrt-transformed API cost)
 
 Sub-agent: real API calls to qwen-plus via DashScope.
 Every route gets a real LLM response regardless of skill choice.
@@ -45,9 +46,9 @@ FINAL_RE = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
 
 # Valid pools
 VALID_MODELS = {
-    "claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6",
+    "claude-sonnet-4-6", "claude-opus-4-6",
     "gpt-5.4", "gpt-5.3-codex",
-    "gemini-3.1-pro-preview", "gemini-3-flash-preview",
+    "gemini-3-flash-preview",
     "gemini-2.5-flash", "gemini-2.5-flash-lite",
     "kimi-k2.5",
 }
@@ -75,22 +76,24 @@ LAZY_ALLOWED_SOURCES = {
 MODEL_COST_PER_M_TOKENS = {
     # output price USD per 1M tokens (from configs/pools.yaml)
     "gemini-2.5-flash-lite": 0.40,
-    "gemini-2.5-flash": 0.60,
-    "claude-haiku-4-5-20251001": 1.25,
-    "kimi-k2.5": 2.50,
+    "gemini-2.5-flash": 2.50,
+    "kimi-k2.5": 3.00,
     "gemini-3-flash-preview": 3.00,
-    "gemini-3.1-pro-preview": 12.00,
     "gpt-5.3-codex": 14.00,
     "gpt-5.4": 15.00,
     "claude-sonnet-4-6": 15.00,
-    "claude-opus-4-6": 75.00,
+    "claude-opus-4-6": 25.00,
 }
-# ── Rolling-percentile cost normalisation (Router-R1 style) ──────────
-# Instead of dividing by a fixed budget cap, maintain a rolling buffer of
-# recent episode costs, sqrt-transform to compress Opus/Flash's 100×
-# ratio, and percentile-normalise so the 5-95% band maps to [0, 1] with
-# cheap → 1 and expensive → 0. Matches Router-R1's main_ppo.py:41-72
-# and removes the BUDGET_CAP magic number.
+# ── Rolling-percentile cost normalisation ───────────────────────────
+# Cost normalisation without a hand-tuned budget cap. Raw USD cost is
+# sqrt-transformed first (compressing the ~100× dynamic range between
+# frontier models like Opus and cheap ones like Flash-Lite into a more
+# linear scale), then winsorised against the 5-95% band of a rolling
+# buffer of recent episodes: the cheapest 5% map to 1.0, the most
+# expensive 5% map to 0.0, the rest interpolates linearly. This yields
+# cheap → high reward / expensive → low reward without introducing a
+# magic-number BUDGET_CAP hyperparameter, and the buffer makes the
+# signal robust to single-episode outliers.
 _COST_WINDOW_SIZE = 1000
 _COST_Q_LOW, _COST_Q_HIGH = 0.05, 0.95
 _COST_EPS = 1e-8
@@ -98,7 +101,9 @@ _cost_buffer: List[float] = []
 
 
 def _rolling_percentile_cost_reward(raw_cost: float) -> float:
-    """Router-R1-style cost reward in [0, 1]. Cheaper → higher."""
+    """Cost reward in [0, 1]. Cheaper → higher (sqrt-compressed,
+    winsorised against a rolling buffer of recent episode costs).
+    """
     r = float(np.sqrt(max(raw_cost, 0.0)))
     _cost_buffer.append(r)
     if len(_cost_buffer) > _COST_WINDOW_SIZE:
@@ -141,11 +146,9 @@ _MODEL_MAX_TOKENS = {
     # lightweight tier (cheapest, short answers)
     "gemini-2.5-flash-lite": 256,
     "gemini-2.5-flash": 256,
-    "claude-haiku-4-5-20251001": 256,
     # mid tier
     "kimi-k2.5": 512,
     "gemini-3-flash-preview": 512,
-    "gemini-3.1-pro-preview": 512,
     "claude-sonnet-4-6": 512,
     # frontier tier
     "claude-opus-4-6": 768,
@@ -157,15 +160,19 @@ _DEFAULT_MAX_TOKENS = 256
 
 
 def _get_api_client():
-    """OpenAI-compatible client aimed at xiaojingai (proxies real models).
-    Fallback defaults match what scripts/run_tb_baseline.py uses, but env
-    vars REMOTE_API_BASE / REMOTE_API_KEY always win so we can rotate keys
-    or point to a different proxy without touching the code.
+    """OpenAI-compatible client for the worker pool.
+
+    Credentials come exclusively from the environment — no default key is
+    baked into the source so that a forgotten `export` can never silently
+    fall back to a leaked credential. `REMOTE_API_BASE` has a public
+    default because the endpoint URL is not sensitive.
     """
-    api_key = os.environ.get(
-        "REMOTE_API_KEY",
-        "sk-wFh8h2dhytX3J7ywOZld4IVWoEoBr8hZ8DonD60UYHDZSrYT",
-    )
+    api_key = os.environ.get("REMOTE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "REMOTE_API_KEY is not set. Export it in the shell env before "
+            "running anything that touches the worker pool."
+        )
     base_url = os.environ.get(
         "REMOTE_API_BASE",
         "https://open.xiaojingai.com/v1/",
@@ -177,7 +184,7 @@ def call_sub_agent_api(model: str, skill: str, query: str, question: str) -> Tup
     """Call the routed worker model via xiaojingai and return (text, out_tokens).
 
     The router's own choice of `model` is sent verbatim (no tier remap),
-    so haiku really is haiku and opus really is opus — cost and quality
+    so the routed model really runs — cost and quality
     differences are authentic. Skill picks the worker's system prompt;
     the user turn carries the original task question (for context) plus
     the planner's specific subtask query.
@@ -209,7 +216,7 @@ def call_sub_agent_api(model: str, skill: str, query: str, question: str) -> Tup
         return f"API error: {str(e)[:200]}", 0
 
 
-from agent_system.environments.env_package.skillrouter.verifiers import verify as _verify_by_source
+from agent_system.environments.env_package.uno.verifiers import verify as _verify_by_source
 
 
 def check_correctness(prediction: str, gold: str, source: str = "", extras: dict | None = None) -> float:
@@ -227,7 +234,7 @@ def check_correctness(prediction: str, gold: str, source: str = "", extras: dict
         return 0.0
 
 
-class SingleSkillRouterEnv:
+class SingleUnoEnv:
     """Single environment instance for one (question, gold) pair."""
 
     def __init__(self):
@@ -370,8 +377,8 @@ class SingleSkillRouterEnv:
         }
 
 
-class SkillRouterMultiProcessEnv(gym.Env):
-    """Vectorized SkillRouter environment with real API calls."""
+class UnoMultiProcessEnv(gym.Env):
+    """Vectorized UNO environment with real API calls."""
 
     def __init__(
         self,
@@ -389,7 +396,7 @@ class SkillRouterMultiProcessEnv(gym.Env):
         self.max_steps = env_config.max_steps if env_config else 3
         self.alpha = env_config.get("alpha", 0.1) if env_config else 0.1
 
-        self.envs = [SingleSkillRouterEnv() for _ in range(self.batch_size)]
+        self.envs = [SingleUnoEnv() for _ in range(self.batch_size)]
         # More workers for parallel API calls
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.batch_size, 128)
@@ -398,7 +405,7 @@ class SkillRouterMultiProcessEnv(gym.Env):
     def reset(self, kwargs: List[Dict]) -> Tuple[List[str], List[Dict]]:
         if len(kwargs) > self.batch_size:
             self.batch_size = len(kwargs)
-            self.envs = [SingleSkillRouterEnv() for _ in range(self.batch_size)]
+            self.envs = [SingleUnoEnv() for _ in range(self.batch_size)]
 
         obs_list = []
         info_list = []

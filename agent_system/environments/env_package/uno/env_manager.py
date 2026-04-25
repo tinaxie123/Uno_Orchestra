@@ -1,6 +1,6 @@
 """
-SkillRouter Environment Manager for verl-agent.
-Wraps SkillRouterMultiProcessEnv with the verl-agent interface.
+UNO Environment Manager for verl-agent.
+Wraps UnoMultiProcessEnv with the verl-agent interface.
 
 Observation rendering matches the Qwen chat-template output the model
 saw at SFT time:
@@ -24,8 +24,8 @@ from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 
 # Load system prompt once
 _SYSTEM_PROMPT_PATH = os.environ.get(
-    "SKILLROUTER_SYSTEM_PROMPT",
-    "/home/xieht/data/sft/system_prompt.txt"
+    "UNO_SYSTEM_PROMPT",
+    "/home/xieht/data/sft/system_prompt.txt",
 )
 try:
     with open(_SYSTEM_PROMPT_PATH) as f:
@@ -69,9 +69,9 @@ def _render_conversation(
     return "".join(parts)
 
 
-class SkillRouterEnvironmentManager(EnvironmentManagerBase):
+class UnoEnvironmentManager(EnvironmentManagerBase):
     """
-    EnvironmentManager for SkillRouter.
+    EnvironmentManager for UNO.
 
     Each env maintains a pair of parallel lists per sample:
       - assistant_turns[i]: list of prior model outputs (plan+route blocks)

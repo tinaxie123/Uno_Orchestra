@@ -1,10 +1,10 @@
-"""Build the RL prompt pool parquet for SkillRouter training.
+"""Build the RL prompt pool parquet for Uno training.
 
-Input schema (tinaxie/SkillRouter-Curriculum `sft_full`):
+Input schema (tinaxie/Uno-Curriculum `sft_full`):
     id, source, category, question, gold_answer, teacher,
     distillation_pass, n_plan_rounds, n_subtasks, conversations
 
-Output row (verl / Router-R1 convention):
+Output row (verl RL prompt convention):
     prompt         — JSON [{"role":"system", ...}, {"role":"user", ...}]
     data_source    — category (for per-source reward routing)
     ability        — "routing"

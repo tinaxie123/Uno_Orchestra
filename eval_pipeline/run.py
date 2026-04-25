@@ -65,11 +65,11 @@ def build_router(name: str, args) -> BaseRouter:
         return ROUTER_REGISTRY[name](**kw)
     if name == "random":
         return ROUTER_REGISTRY["random"](**kw)
-    if name == "skill-sft":
-        from .routers.router_sft import SkillRouterSFT
-        return SkillRouterSFT(
+    if name == "uno-sft":
+        from .routers.router_sft import UnoSFT
+        return UnoSFT(
             local_base=args.local_base,
-            model_name=args.local_model or "SkillRouter-SFT",
+            model_name=args.local_model or "Uno-SFT",
             **kw,
         )
     raise ValueError(f"Unknown router: {name}")
