@@ -1,6 +1,8 @@
 # 🎉 Uno-Orchestra
 
 > 💗 We propose **Uno-Orchestra** — a 7b router model that, given a task, decomposes it into subtasks and dispatches each to a `(worker model, skill)` pair. Uno-Orchestra is trained in two stages：📚 **SFT** on distilled trajectories 💰 **cost-aware GRPO** 
+>
+>
 > 🏗️ built on top of [**verl**](https://github.com/volcengine/verl), whose training stack made the RL side tractable. 
 
 ## 🎆Configure Your Own Uno-Orchestra
