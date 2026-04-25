@@ -68,7 +68,7 @@ For each failed trajectory, we feed the full execution trace—including the Orc
 
 ## Dataset Description
 
-Every SFT row comes from a real public HuggingFace dataset — the `question` and `gold_answer` are sampled verbatim from a `source` we record on the row. Every row then passes through the **same three-stage pipeline** (§ Data Selection Pipeline) — router probe → teacher trajectory → noise removal — to obtain the multi-turn trajectory that teaches the router how to handle that question.
+
 For different tasks, we adopt different generation pipeline:
 
 - **QA / reasoning / math** — the teacher (Claude Opus) derives the `<plan>/<route>/<obs>/<verify>/<final_answer>` trajectory directly from the question plus the dataset's own context / evidence field (Wikipedia passages for HotpotQA, search snippets for TriviaQA, the step-by-step solution for GSM8K, etc. — see § Distillation for the full evidence map). No external environment is invoked because these benchmarks don't have one.
@@ -76,19 +76,6 @@ For different tasks, we adopt different generation pipeline:
 
 In both cases the per-source verifier scores the teacher's `<final_answer>` against the real gold, so only gold-matching trajectories enter the SFT corpus.
 
-### Sources (38 HuggingFace datasets, 9 categories)
-
-| Category | Count | Share | `source` values |
-|---|---:|---:|---|
-| qa_multi_hop | 31,957 | 52.2% | hotpotqa_fullwiki, 2wikimultihopqa, musique_answerable, bamboogle, hotpotqa, musique |
-| reasoning_commonsense | 8,465 | 13.8% | commonsenseqa, strategyqa, social_iqa, piqa, winogrande, logiqa2, arc_challenge, bbh_*, folio |
-| qa_open_domain | 6,787 | 11.1% | nq_open, triviaqa_nocontext, webquestions, quality |
-| knowledge_academic | 6,208 | 10.1% | mmlu_aux_stem, sciq, openbookqa, aqua_rat, theoremqa, legalbench |
-| math | 4,597 | 7.5% | gsm8k_main, gsm8k, numinamath, hendrycks_math_{algebra, intermediate_algebra, number_theory} |
-| code | 2,157 | 3.5% | codeforces_cots, codecontests, taco |
-| tool_use | 705 | 1.2% | toolace |
-| reading_comprehension | 289 | 0.5% | drop |
-| other | 36 | 0.1% | misc rows lacking HF-side metadata |
 
 ### Two expansion passes on top of the base pipeline
 
