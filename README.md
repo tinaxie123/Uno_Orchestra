@@ -1,8 +1,8 @@
-# Uno-Orchestra
+# 🎉 Uno-Orchestra
 
-
-## 🎉 
-Hierarchical-delegation router that decomposes a task into subtasks and routes each to a `(worker model, skill)` pair, trained with SFT + cost-aware RL.
+> We propose **Uno-Orchestra** — a small 🧠 router model that, given a task, 🪓 decomposes it into subtasks and 🚦 dispatches each to a `(worker model, skill)` pair.
+>
+> 🏋️ Uno-Orchestra is trained in two stages — 📚 **SFT** on distilled trajectories, then 💰 **cost-aware GRPO** — 🏗️ built on top of [**verl**](https://github.com/volcengine/verl), whose training stack made the RL side tractable. 🙏
 
 ## 🎆Configure Your Own Uno-Orchestra
 
