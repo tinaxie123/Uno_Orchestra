@@ -21,18 +21,8 @@ A router must learn **when** and **how** to decompose a task. According to the c
 🍑**multi-step planning**, where intermediate results shape subsequent actions.
 
 
-We pick a minimal set of **anchor sources** such that each of the four capability dimensions is covered by at least one dataset and every anchor contributes a decomposition pattern the others do not — GSM8K, NuminaMath-CoT, DROP, HotpotQA, MuSiQue, TACO, ToolACE — and then supplement with a broader tail of open-domain QA, commonsense, and academic-knowledge datasets to thicken coverage at each level. Two inclusion criteria gate every source: **(i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model and multi-step tasks where it must decompose the problem into dependent sub-tasks; (ii) gold answers must be automatically verifiable to enable scalable filtering. After curriculum filtering the corpus spans 38 HuggingFace datasets across 9 categories for 61,201 trajectories total; the full per-source breakdown is recorded on disk in `train_final_stats.json`.**
+We pick a minimal set of **anchor sources** such that each of the four capability dimensions is covered by at least one dataset and every anchor contributes a decomposition pattern the others do not — GSM8K, NuminaMath-CoT, DROP, HotpotQA, MuSiQue, TACO, ToolACE — and then supplement with a broader tail of open-domain QA, commonsense, and academic-knowledge datasets to thicken coverage at each level. Two inclusion criteria gate every source: **(i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model and multi-step tasks where it must decompose the problem into dependent sub-tasks; (ii) gold answers must be automatically verifiable to enable scalable filtering.**
 
-**🧁 Stratified coverage sampling.** We construct the training pool by drawing a fixed quota from each source so that four orthogonal capability axes are each exercised by at least two datasets and no single axis dominates the mixture. This yields approximately 10k raw tasks. After bootstrapped curriculum filtering,
-
-
-| Capability axis | What the router must learn | Datasets |
-|---|---|---|
-| **Atomic reasoning** | Forward the task to a single model | GSM8K |
-| **Compositional reasoning** | Multi-step symbolic manipulation requiring chain-of-thought delegation | NuminaMath-CoT |
-| **Knowledge retrieval** | Decompose into independent evidence-gathering subtasks | DROP, HotpotQA |
-| **Knowledge composition** | Deep sequential decomposition with inter-subtask dependencies | MuSiQue |
-| **Tool orchestration** | Select correct tool–model pairs and chain API calls | TACO, ToolACE |
 
 ### 🍭Data Selection Pipeline
 
@@ -45,6 +35,17 @@ The end-to-end pipeline from the raw ~10 k task pool to the final 61,201-traject
 5. **Fallback distillation cascade** — RL-pool tasks the primary teacher missed are retried under a stronger teacher cascade; whichever cascade step solves the task promotes that trajectory from RL into SFT.
 
 Phases 1–3 are detailed in this section; phases 4–5 are documented under "*Two expansion passes on top of the base pipeline*" further below. The whole pipeline is **self-adaptive**: re-running it after each training round produces a curriculum of increasing difficulty, since the router's capability boundary shifts with training.
+
+**🧁 Stratified coverage sampling.** We construct the training pool by drawing a fixed quota from each source so that four orthogonal capability axes are each exercised by at least two datasets and no single axis dominates the mixture. This yields approximately 10k raw tasks. After bootstrapped curriculum filtering,
+
+
+| Capability axis | What the router must learn | Datasets |
+|---|---|---|
+| **Atomic reasoning** | Forward the task to a single model | GSM8K |
+| **Compositional reasoning** | Multi-step symbolic manipulation requiring chain-of-thought delegation | NuminaMath-CoT |
+| **Knowledge retrieval** | Decompose into independent evidence-gathering subtasks | DROP, HotpotQA |
+| **Knowledge composition** | Deep sequential decomposition with inter-subtask dependencies | MuSiQue |
+| **Tool orchestration** | Select correct tool–model pairs and chain API calls | TACO, ToolACE |
 
 ### 🍒Bootstrapped curriculum filtering
 
