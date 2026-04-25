@@ -23,22 +23,6 @@ A router must learn **when** and **how** to decompose a task. According to the c
 
 We pick a minimal set of **anchor sources** such that each of the four capability dimensions is covered by at least one dataset and every anchor contributes a decomposition pattern the others do not — GSM8K, NuminaMath-CoT, DROP, HotpotQA, MuSiQue, TACO, ToolACE — and then supplement with a broader tail of open-domain QA, commonsense, and academic-knowledge datasets to thicken coverage at each level. Two inclusion criteria gate every source: **(i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model and multi-step tasks where it must decompose the problem into dependent sub-tasks; (ii) gold answers must be automatically verifiable to enable scalable filtering.**
 
-
-### 🍭Data Selection Pipeline
-
-The end-to-end pipeline from the raw ~10 k task pool to the final 61,201-trajectory SFT corpus runs in **five phases**:
-
-1. **Stratified coverage sampling** (§ above) — quota-balanced draws across the four capability axes so no axis dominates the mixture; output ≈ 10 k raw tasks.
-2. **Bootstrapped curriculum filtering** (3 stages: *router probe → teacher trajectory → noise removal*) — discards any task the current router can already solve and any trajectory polluted by infrastructure or annotation noise, so every retained example is a genuine capability gap.
-3. **Failure-driven in-context learning** — 3 iterative rounds of GPT-4o-based failure-mode diagnosis on the Orchestrator's instruction; task-agnostic patches are folded back into its prompt until prompt clarity saturates.
-4. **Rejection-sampled augmentation** — extra teacher rollouts at varied temperatures, gold-verified, to enlarge the SFT pool with high-diversity trajectories.
-5. **Fallback distillation cascade** — RL-pool tasks the primary teacher missed are retried under a stronger teacher cascade; whichever cascade step solves the task promotes that trajectory from RL into SFT.
-
-Phases 1–3 are detailed in this section; phases 4–5 are documented under "*Two expansion passes on top of the base pipeline*" further below. The whole pipeline is **self-adaptive**: re-running it after each training round produces a curriculum of increasing difficulty, since the router's capability boundary shifts with training.
-
-**🧁 Stratified coverage sampling.** We construct the training pool by drawing a fixed quota from each source so that four orthogonal capability axes are each exercised by at least two datasets and no single axis dominates the mixture. This yields approximately 10k raw tasks. After bootstrapped curriculum filtering,
-
-
 | Capability axis | What the router must learn | Datasets |
 |---|---|---|
 | **Atomic reasoning** | Forward the task to a single model | GSM8K |
@@ -47,37 +31,29 @@ Phases 1–3 are detailed in this section; phases 4–5 are documented under "*T
 | **Knowledge composition** | Deep sequential decomposition with inter-subtask dependencies | MuSiQue |
 | **Tool orchestration** | Select correct tool–model pairs and chain API calls | TACO, ToolACE |
 
-### 🍒Bootstrapped curriculum filtering
+### 🍭Data Selection Pipeline
 
-*Stage 1*: **Router probe**. We run the current router checkpoint on every task in the pool with real sub-model execution — the router decomposes the task, delegates sub-tasks to actual models, and produces a final answer. We evaluate each task via pass\@3 and check against the gold label. Tasks the router already solves correctly are discarded, as they carry no learning signal.
+The pipeline turns the raw ~10 k task pool into the final 61,201-trajectory SFT corpus in **five phases**. Re-running it after every training round yields a curriculum of increasing difficulty, since the router's capability boundary shifts as it improves.
 
-*Stage 2*: **Teacher trajectory** For each remaining task — where the router failed — we run a strong teacher orchestrator with the same model pool. If the teacher produces a correct trajectory, the task enters the SFT set as a demonstration for imitation learning. If the teacher also fails, the task enters the RL set, where the router must discover a working decomposition through its own exploration.
+**Phase 1 — Stratified coverage sampling.** Fixed per-source quotas so each of the five capability axes above is exercised by at least one dataset and no axis dominates. Output: ≈ 10 k raw tasks.
 
-*Stage 3*: **Noise removal**: trajectories with infrastructure artifacts (API timeouts, incomplete responses) or dataset annotation errors (gold answers that are not valid API calls) are discarded, as they provide neither correct demonstrations nor meaningful reward signal.
+**Phase 2 — Bootstrapped curriculum filtering.** Three stages over every task in the pool:
 
-✅**Failure-Driven in context learning**
-For each failed trajectory, we feed the full execution trace—including the Orchestrator's delegation decisions, sub-agent responses, and the final erroneous answer into GPT-4o, which diagnoses the root cause and assigns it to one of the following failure categories: (i) information loss which happens when the Orchestrator omits critical context when delegating subtasks; (ii) premature aggregation—intermediate results are returned without completing the final computation; (iii) format mismatch—the answer is semantically correct but does not conform to the expected output format; and (iv) delegation scope error—the task is under or over decomposed. Once failures are categorized, we generate a minimal, targeted constraint for each high-frequency category and inject it into the Orchestrator's instruction. Crucially, these patches are not instance-specific fixes tied to particular failing examples; rather, they clarify the Orchestrator's general understanding of the task protocol—such as what constitutes a complete answer or what information must be preserved during delegation. The resulting constraints are task-agnostic and transfer to unseen problems, since they address systematic gaps in how the Orchestrator interprets its role rather than surface-level errors on individual inputs.
+1. *Router probe* — run the current router checkpoint with real sub-model execution and score pass@3 against gold. Tasks the router already solves are discarded (no learning signal).
+2. *Teacher trajectory* — for each remaining task, run a strong teacher orchestrator. Correct teacher trajectories enter the SFT set; tasks where the teacher also fails enter the RL pool, where the router must discover a decomposition through its own exploration.
+3. *Noise removal* — drop trajectories polluted by infrastructure artifacts (API timeouts, incomplete responses) or annotation errors (e.g. gold answers that aren't valid API calls).
 
-📷This diagnostic-then-patch loop runs for 3 rounds. By the third round, the failure taxonomy reveals that all remaining errors stem from suboptimal routing decisions—such as dispatching a complex symbolic reasoning task to a lightweight model—rather than ambiguity in the Orchestrator's instructions. This indicates that prompt clarity has been saturated, and further gains require improving the Router's model selection policy.
+The teacher's trajectory generation depends on source type: for **QA / reasoning / math** the teacher (Claude Opus) derives the `<plan>/<route>/<obs>/<verify>/<final_answer>` trace from the question plus the dataset's own context / evidence field (Wikipedia passages for HotpotQA, search snippets for TriviaQA, the step-by-step solution for GSM8K — see § Distillation for the full evidence map); for **code (TACO) / tool use (ToolACE)** every `<route>` is executed for real (sandbox or live API) and `<obs>` carries the actual output. In both regimes the per-source verifier scores `<final_answer>` against the gold, so only gold-matching trajectories survive.
+
+**Phase 3 — Failure-driven in-context learning.** Each failed teacher trajectory is fed (full execution trace) into GPT-4o, which classifies the failure as **(i)** information loss — Orchestrator omitted critical context when delegating; **(ii)** premature aggregation — intermediate result returned without final computation; **(iii)** format mismatch — semantically correct but wrong output shape; or **(iv)** delegation scope error — under- or over-decomposed. Each high-frequency category yields one task-agnostic constraint added to the Orchestrator's instruction. The loop runs for 3 rounds; by round 3 residual errors are routing-policy issues (wrong model picked for the task), indicating prompt clarity has saturated and further gains require Router model improvements rather than more prompt patches.
+
+**Phase 4 — Rejection-sampled augmentation** (`scripts/data/augment_sft.py`). K = 2 extra teacher rollouts at temperatures {0.5, 1.0} per SFT question; K = 3 at {0.3, 0.7, 1.0} for the harder RL-pool questions. Only trajectories that pass the per-source verifier survive — the gold label doubles as a consistency gate.
+
+**Phase 5 — Fallback distillation cascade** (`scripts/data/rescue_rl_pool.py`). RL-pool questions where the primary teacher (qwen3.5-plus) failed are retried under a stronger cascade (gemini-2.5-pro → claude-sonnet-4-6 → gpt-5.4) at pass@3; whichever cascade step solves the task promotes that trajectory from the RL pool into SFT. This pass shrinks the RL pool from 4,549 → **2,976** tasks (−34.6%) by rescuing 295 previously unsolvable questions; the largest gains are on tool orchestration, where gemini-2.5-pro's code generation resolves TACO tasks qwen3.5-plus could not.
+
+Every row carries `teacher` (which model produced the trajectory) and `distillation_pass` (`primary` / `augmentation` / `fallback`) alongside `source`, so trajectory provenance is fully traceable.
 
 ## Dataset Description
-
-
-For different tasks, we adopt different generation pipeline:
-
-- **QA / reasoning / math** — the teacher (Claude Opus) derives the `<plan>/<route>/<obs>/<verify>/<final_answer>` trajectory directly from the question plus the dataset's own context / evidence field (Wikipedia passages for HotpotQA, search snippets for TriviaQA, the step-by-step solution for GSM8K, etc. — see § Distillation for the full evidence map). No external environment is invoked because these benchmarks don't have one.
-- **Code (TACO) / tool use (ToolACE)** — the trajectory is produced through real runtime execution: routed `<route>` calls actually run code in the sandbox or actually fire tool calls against the schema, and the `<obs>` content is the executor's / API's real output, not a reconstruction.
-
-In both cases the per-source verifier scores the teacher's `<final_answer>` against the real gold, so only gold-matching trajectories enter the SFT corpus.
-
-
-### Two expansion passes on top of the base pipeline
-
-1. **Rejection-sampled augmentation** (`scripts/data/augment_sft.py`): K=2 extra teacher rollouts at temperatures {0.5, 1.0} for every SFT question; K=3 at {0.3, 0.7, 1.0} for the harder RL-pool questions. Only trajectories that pass the per-source verifier survive — the gold label doubles as a consistency gate.
-
-2. **Fallback distillation** (`scripts/data/rescue_rl_pool.py`): RL-pool questions — where the primary teacher (qwen3.5-plus) failed — are retried with a stronger cascade (gemini-2.5-pro → claude-sonnet-4-6 → gpt-5.4) under pass@3. Whichever cascade step resolves the question yields a trajectory that is promoted from the RL pool into the SFT corpus. This pass shrinks the RL pool from 4,549 to **2,976** tasks (−34.6%) by promoting 295 previously unsolvable questions; the largest gains are on tool orchestration, where gemini-2.5-pro's code generation resolves TACO tasks qwen3.5-plus could not.
-
-Each row carries `teacher` (which model produced the trajectory) and `distillation_pass` (primary / augmentation / fallback) alongside `source`, so the provenance of every trajectory is fully traceable.
 
 ### 7 real-rollout benchmarks selected for analysis
 
