@@ -4,7 +4,7 @@
 >
 > 🏗️ built on top of [**verl**](https://github.com/volcengine/verl), whose training stack made the RL side tractable. 
 
-## 🎆Configure Your Own Uno-Orchestra
+## 🎆Configure Your Own Uno-router
 
 ### 🍬Data Source Pool Construction
 
