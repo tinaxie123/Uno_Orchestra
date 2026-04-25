@@ -1,9 +1,10 @@
 # Uno-Orchestra
 
 
-## 🎉 Hierarchical-delegation router that decomposes a task into subtasks and routes each to a `(worker model, skill)` pair, trained with SFT + cost-aware RL.
+## 🎉 
+Hierarchical-delegation router that decomposes a task into subtasks and routes each to a `(worker model, skill)` pair, trained with SFT + cost-aware RL.
 
-## 🎆Configure Your Own LLM skillrouter
+## 🎆Configure Your Own Uno-Orchestra
 
 ### 🍬Data Source Pool Construction
 
@@ -151,11 +152,11 @@ HuggingFace Datasets (31 sources, 10 domains)
         │                - Classifies trajectory behavior
         │                - Outputs train_final.parquet + train_final_stats.json
         ▼
-[3] SFT Training (LlamaFactory, 4×H100)     Fine-tune Qwen2.5-7B-Instruct
+[3] SFT Training (LlamaFactory)     Fine-tune Qwen2.5-7B-Instruct
         │                - ShareGPT multi-turn, mask non-assistant turns
         │                - 2 epochs, lr=2e-5, DeepSpeed ZeRO-3, packing on
         ▼
-[4] RL Training (verl-agent, GiGPO / GRPO)  Cost-aware reinforcement learning
+[4] RL Training (verl-agent, GRPO)  Cost-aware reinforcement learning
         │                - Real worker-API calls via the xiaojingai proxy
         │                - Per-source verifiers (math / qa / code / tool)
         │                - Terminal reward = (1−α)·correctness + α·cost_bonus
@@ -267,8 +268,8 @@ Checks: schema validation, message structure, obs quality, gold match, duplicate
 - DeepSpeed ZeRO-3, bf16, packing on, cutoff 16,384
 - 2 epochs, lr 2e-5, cosine, warmup 100 steps
 - Effective batch 128 (4 × per_dev 1 × grad_accum 32)
-- Reference run on 4× H100 80GB: 246 steps, ~6h14m, train_loss 0.5875, eval_loss 0.2427 (1% holdout). Launch via `bash scripts/sft/run_sft.sh`. ZeRO-3 (not ZeRO-2) is required at this seq-len on 4 GPUs — ZeRO-2 OOMs at the first backward.
-
+- Reference run on 4× H100 80GB: 246 steps, ~6h14m, train_loss 0.5875, eval_loss 0.2427 (1% holdout). Launch via `bash scripts/sft/run_sft.sh`.
+  
 #### 🍏 Hierarchical SFT — Methodology
 
 For every question that survives the three-stage curriculum filter (§ Data Selection Pipeline), the teacher produces an expert trajectory
