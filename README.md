@@ -25,15 +25,7 @@ We select a minimal set of sources such that each of the four dimensions is cove
 **(i) the task must exercise the router's decision-making capability, spanning both single-step tasks where the router learns to dispatch directly to an appropriate model, and multi-step tasks where it must decompose the problem into dependent sub-tasks;
 (ii) gold answers must be automatically verifiable to enable scalable filtering;**
 
-Sources:
-
-- GSM8K (Cobbe et al., 2021) — grade-school math, teaches the router when NOT to decompose
-- DAPO-Math-17k (Yu et al., 2025) and NuminaMath-CoT (Li et al., 2024) — competition-level mathematical reasoning
-- DROP, train split (Dua et al., 2019) — span extraction and arithmetic over paragraphs
-- HotpotQA (Yang et al., 2018), train split — 2-hop question answering
-- MuSiQue (Trivedi et al., 2022), train split — 3-4 hop question answering requiring deeper decomposition
-- TACO (Li et al., 2023) — competitive programming
-- ToolACE (Liu et al., 2024) — multi-step tool orchestration involving API chaining and sequential planning
+We seed the pool with 7 anchor sources — GSM8K, NuminaMath-CoT, DROP, HotpotQA, MuSiQue, TACO, ToolACE — that together cover all four capability dimensions, and supplement with a broader tail of open-domain QA, commonsense, and academic-knowledge datasets to thicken coverage at each level. After curriculum filtering the corpus spans 38 HuggingFace datasets across 9 categories for 61,201 trajectories total; the full per-source breakdown is recorded on disk in `train_final_stats.json`.
 
 **🧁 Stratified coverage sampling.** We construct the training pool by drawing a fixed quota from each source so that four orthogonal capability axes are each exercised by at least two datasets and no single axis dominates the mixture. This yields approximately 10k raw tasks. After bootstrapped curriculum filtering,
 
@@ -48,7 +40,15 @@ Sources:
 
 ### 🍭Data Selection Pipeline
 
-We employ **bootstrapped curriculum filtering** on raw question sets from training data pools for supervised fine-tuning and reinforcement learning to ensure the training set consists entirely of router's capability gaps.
+The end-to-end pipeline from the raw ~10 k task pool to the final 61,201-trajectory SFT corpus runs in **five phases**:
+
+1. **Stratified coverage sampling** (§ above) — quota-balanced draws across the four capability axes so no axis dominates the mixture; output ≈ 10 k raw tasks.
+2. **Bootstrapped curriculum filtering** (3 stages: *router probe → teacher trajectory → noise removal*) — discards any task the current router can already solve and any trajectory polluted by infrastructure or annotation noise, so every retained example is a genuine capability gap.
+3. **Failure-driven in-context learning** — 3 iterative rounds of GPT-4o-based failure-mode diagnosis on the Orchestrator's instruction; task-agnostic patches are folded back into its prompt until prompt clarity saturates.
+4. **Rejection-sampled augmentation** — extra teacher rollouts at varied temperatures, gold-verified, to enlarge the SFT pool with high-diversity trajectories.
+5. **Fallback distillation cascade** — RL-pool tasks the primary teacher missed are retried under a stronger teacher cascade; whichever cascade step solves the task promotes that trajectory from RL into SFT.
+
+Phases 1–3 are detailed in this section; phases 4–5 are documented under "*Two expansion passes on top of the base pipeline*" further below. The whole pipeline is **self-adaptive**: re-running it after each training round produces a curriculum of increasing difficulty, since the router's capability boundary shifts with training.
 
 ### 🍒Bootstrapped curriculum filtering
 
@@ -57,9 +57,6 @@ We employ **bootstrapped curriculum filtering** on raw question sets from traini
 *Stage 2*: **Teacher trajectory** For each remaining task — where the router failed — we run a strong teacher orchestrator with the same model pool. If the teacher produces a correct trajectory, the task enters the SFT set as a demonstration for imitation learning. If the teacher also fails, the task enters the RL set, where the router must discover a working decomposition through its own exploration.
 
 *Stage 3*: **Noise removal**: trajectories with infrastructure artifacts (API timeouts, incomplete responses) or dataset annotation errors (gold answers that are not valid API calls) are discarded, as they provide neither correct demonstrations nor meaningful reward signal.
-
-This pipeline is self-adaptive: it can be re-applied after each training round to produce a curriculum of increasing difficulty, as the router's capability boundary shifts with training.
-
 
 ✅**Failure-Driven in context learning**
 For each failed trajectory, we feed the full execution trace—including the Orchestrator's delegation decisions, sub-agent responses, and the final erroneous answer into GPT-4o, which diagnoses the root cause and assigns it to one of the following failure categories: (i) information loss which happens when the Orchestrator omits critical context when delegating subtasks; (ii) premature aggregation—intermediate results are returned without completing the final computation; (iii) format mismatch—the answer is semantically correct but does not conform to the expected output format; and (iv) delegation scope error—the task is under or over decomposed. Once failures are categorized, we generate a minimal, targeted constraint for each high-frequency category and inject it into the Orchestrator's instruction. Crucially, these patches are not instance-specific fixes tied to particular failing examples; rather, they clarify the Orchestrator's general understanding of the task protocol—such as what constitutes a complete answer or what information must be preserved during delegation. The resulting constraints are task-agnostic and transfer to unseen problems, since they address systematic gaps in how the Orchestrator interprets its role rather than surface-level errors on individual inputs.
