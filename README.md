@@ -73,7 +73,7 @@ Tool orchestration receives the largest share of SFT demonstrations here (64.9%)
 Per-source root-cause breakdown of the 21,642 failing real-rollout trajectories is deferred to § Error Taxonomy below.
 
 
-**61,201 multi-turn ShareGPT conversations** (system → human → assistant → observation → assistant → ...). Each row:
+### **61,201 multi-turn ShareGPT conversations** (system → human → assistant → observation → assistant → ...). Each row:
 
 | Field | Type | Description |
 |---|---|---|
