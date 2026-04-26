@@ -144,7 +144,16 @@ class UnoAgentLoop(AgentLoopBase):
                     ids, skip_special_tokens=True
                 ),
             )
-            step = env.step(turn_text)
+            # env.step() calls call_sub_agent_api() over HTTP in a loop
+            # over routes (envs.py:350). Running it inline would block the
+            # AgentLoopWorker's event loop, stalling all other rollouts on
+            # the same worker — that's the v3-v6b smoke hang.
+            # Default-arg lambda binds turn_text at definition time, since
+            # the variable is reassigned each iteration of the outer loop.
+            step = await self.loop.run_in_executor(
+                None,
+                lambda t=turn_text: env.step(t),
+            )
             env_meta_last = step.get("metadata", {}) or {}
             n_route_calls += int(env_meta_last.get("n_routes", 0))
 
