@@ -512,19 +512,9 @@ python -m eval_pipeline.run --router ROUTER --bench BENCH --api_key KEY
 | Router-R1 | Prior art | Search/QA-only, no cost reward |
 | **Uno-SFT** | **Learned routing + decomposition** | Our method (SFT only) |
 | **Uno-RL** | **Learned routing + decomposition + RL** | Our full method |
+....
 
-### Current Progress
 
-| Baseline | SWE-bench (500) | Terminal-Bench (89) |
-|----------|:---:|:---:|
-| Router-R1 | 500 gen, 500 verified | 500 gen, 30/89 verified |
-| Uno-SFT | 500 gen | 89 gen, 17/89 verified |
-| Direct(Qwen2.5-7B) | 500 gen | 89 gen, 19/89 verified |
-| Direct(GPT-5.4) | 500 gen, 500 verified | 89 gen, 25/89 verified |
-| Oracle-Codex | 500 gen, 500 verified | 89 gen, 16/89 verified |
-| router+claude | 500 gen, 500 verified | 89 gen, 27/89 verified |
-| Oracle-Cheapest | 500 gen, 500 verified | 89 gen, 29/89 verified |
-| Random | 500 gen, 500 verified | 89 gen, 29/89 verified |
 
 ## 🧩 Repository Structure
 
