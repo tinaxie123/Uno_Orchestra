@@ -32,6 +32,7 @@ under the name ``"uno"``. The launcher selects it via Hydra:
 """
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import Any
 
@@ -40,6 +41,8 @@ import torch
 
 from verl import DataProto
 from verl.workers.reward_manager.abstract import AbstractRewardManager
+
+logger = logging.getLogger(__name__)
 
 
 # Keys the agent loop attaches to every rollout. We surface them as
@@ -87,11 +90,16 @@ class UnoRewardManager(AbstractRewardManager):
 
         terminals = data.non_tensor_batch.get("env_terminal_reward")
         if terminals is None:
-            raise KeyError(
-                "UnoRewardManager expected non_tensor_batch['env_terminal_reward'] "
-                "(emitted by UnoAgentLoop in extra_fields). Did you forget to "
-                "import scripts.rl.uno_rollout in the trainer entry?"
+            logger.warning(
+                "UnoRewardManager: non_tensor_batch['env_terminal_reward'] "
+                "missing — falling back to zero rewards for this batch (bsz=%d). "
+                "This is expected for non-uno bisect runs; if you see this "
+                "with default_agent_loop=uno, check that scripts.rl.uno_rollout "
+                "is importable and AgentLoopOutput.extra_fields['env_terminal_reward'] "
+                "is being populated.",
+                bsz,
             )
+            terminals = np.zeros(bsz, dtype=object)
 
         printed: dict[str, int] = {}
         for i in range(bsz):
