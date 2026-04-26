@@ -203,6 +203,24 @@ class UnoAgentLoop(AgentLoopBase):
             obs_ids = await self.apply_chat_template(
                 obs_messages, remove_system_prompt=True
             )
+            # Inter-turn newline guard. vLLM stops at <|im_end|> and does
+            # NOT emit the trailing '\n' that LlamaFactory's
+            # format_assistant ({{content}}<|im_end|>\n) wrote into the SFT
+            # corpus. Without this guard the obs splice produces
+            # ...<|im_end|><|im_start|>user\n... — one byte off from SFT
+            # at every turn boundary, observed in canary v10 byte-sanity
+            # log as the residual driver of turn-2 format_error. Insert a
+            # single '\n' (Qwen2 tokenizer: id 198) before the obs block
+            # iff the previous token isn't already '\n'. Mask it as a
+            # non-policy token (0) since vLLM didn't generate it.
+            newline_ids = self.tokenizer(
+                "\n", add_special_tokens=False
+            ).input_ids
+            if newline_ids and (
+                not full_ids or full_ids[-1] != newline_ids[-1]
+            ):
+                full_ids.extend(newline_ids)
+                response_mask.extend([0] * len(newline_ids))
             full_ids.extend(obs_ids)
             response_mask.extend([0] * len(obs_ids))
             n_obs_tokens += len(obs_ids)
