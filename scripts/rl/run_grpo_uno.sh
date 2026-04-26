@@ -65,6 +65,9 @@ echo "============================================================"
 [[ -e "$MODEL_PATH" ]]      || { echo "FATAL: MODEL_PATH not found"   >&2; exit 2; }
 [[ -e "$TRAIN_PARQUET" ]]   || { echo "FATAL: TRAIN_PARQUET not found">&2; exit 2; }
 [[ -e "$VAL_PARQUET" ]]     || { echo "FATAL: VAL_PARQUET not found"  >&2; exit 2; }
+# The Uno env's worker pool calls a remote LLM API for sub-agent skills;
+# fail fast here rather than after 30 s of vLLM init if the key isn't set.
+[[ -n "${REMOTE_API_KEY:-}" ]] || { echo "FATAL: REMOTE_API_KEY not set in env (worker pool needs it)" >&2; exit 2; }
 set -x
 
 "$PYTHON_BIN" -m verl.trainer.main_ppo \
@@ -96,7 +99,7 @@ set -x
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.mode=async \
+    actor_rollout_ref.rollout.mode=sync \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=8 \
@@ -109,6 +112,7 @@ set -x
     reward_manager.source=importlib \
     reward_manager.name=UnoRewardManager \
     reward_manager.module.path="$REWARD_MODULE_PATH" \
+    reward_model.use_reward_loop=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="$PROJECT_NAME" \
