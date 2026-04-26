@@ -97,10 +97,10 @@ HuggingFace Datasets (31 sources, 10 domains)
         │
         ▼
 [1] scripts/data/generate_trajectories.py   Teacher distillation (API calls)
-        │                - Loads (question, gold, evidence) from HF
-        │                - Calls teacher model(s) to generate trajectory
-        │                - Validates against schema (16 hard rules)
-        │                - Outputs raw JSONL
+        │                
+        │                
+        │            
+        │                
         ▼
 [2] scripts/data/build_dataset.py           Build training set
         │                - Re-validates every sample
