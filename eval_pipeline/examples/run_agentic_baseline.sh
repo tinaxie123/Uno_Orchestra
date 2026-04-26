@@ -8,8 +8,8 @@
 #   bash eval_pipeline/examples/run_agentic_baseline.sh --status  # check progress
 set -euo pipefail
 
-API_KEY="sk-wFh8h2dhytX3J7ywOZld4IVWoEoBr8hZ8DonD60UYHDZSrYT"
-API_BASE="https://open.xiaojingai.com/v1/"
+API_KEY="${REMOTE_API_KEY:?set REMOTE_API_KEY in your shell env}"
+API_BASE="${REMOTE_API_BASE:-https://open.xiaojingai.com/v1/}"
 MODEL="/data/MODEL/Qwen2.5-7B-Instruct"
 MODEL_NAME="Qwen/Qwen2.5-7B-Instruct"
 OUT="/data/xieht/multiagentRL/data/eval/agentic_baseline"

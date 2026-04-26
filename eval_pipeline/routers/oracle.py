@@ -61,7 +61,7 @@ class OracleRouter(BaseRouter):
 
 
 def cheapest_router(**kw):
-    return OracleRouter("claude-haiku-4-5-20251001", "Cheapest(haiku)", **kw)
+    return OracleRouter("gemini-2.5-flash-lite", "Cheapest(gemini-flash-lite)", **kw)
 
 def router_plus_claude(**kw):
     return OracleRouter("claude-opus-4-6", "router+claude", **kw)

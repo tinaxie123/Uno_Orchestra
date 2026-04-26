@@ -261,8 +261,8 @@ knowledge composition, tool orchestration).
 ```python
 from datasets import load_dataset
 
-sft = load_dataset("tinaxie123/Uno-Curriculum", "sft", split="train")
-rl  = load_dataset("tinaxie123/Uno-Curriculum", "rl",  split="train")
+sft = load_dataset("tinaxie/Uno-Curriculum", "sft", split="train")
+rl  = load_dataset("tinaxie/Uno-Curriculum", "rl",  split="train")
 ```
 
 ## Config: `sft` ({len(sft_rows):,} trajectories)

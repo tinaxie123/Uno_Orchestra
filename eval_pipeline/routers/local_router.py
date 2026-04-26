@@ -13,13 +13,13 @@ Answer the given question. \
 Every time you receive new information, reason inside <think> ... </think>. \
 Then call a specialized LLM via <search> LLM-Name:Your-Query </search>. \
 
-STRICT FORMAT: Replace LLM-Name with EXACT name from [Gemini-2.5-Flash-Lite, Gemini-2.5-Flash, Kimi-K2.5, Gemini-3-Flash-Preview, Claude-Haiku-4.5, GPT-5.3-Codex, GPT-5.4, Claude-Sonnet-4.6, Claude-Opus-4.6]. \
+STRICT FORMAT: Replace LLM-Name with EXACT name from [Gemini-2.5-Flash-Lite, Gemini-2.5-Flash, Kimi-K2.5, Gemini-3-Flash-Preview, GPT-5.3-Codex, GPT-5.4, Claude-Sonnet-4.6, Claude-Opus-4.6]. \
 NEVER use literal "LLM-Name". Before each call, reason in <think> about which model and why. \
 Response appears in <information>...</information>. When done: <answer>...</answer>. \
 
 Models (input/output $/1M tokens): \
-Gemini-2.5-Flash-Lite($0.10/$0.40) Gemini-2.5-Flash($0.30/$2.50) Kimi-K2.5($0.35/$2.50) \
-Gemini-3-Flash-Preview($0.50/$3) Claude-Haiku-4.5($1/$5) GPT-5.3-Codex($1.75/$14) \
+Gemini-2.5-Flash-Lite($0.10/$0.40) Gemini-2.5-Flash($0.30/$2.50) Kimi-K2.5($0.60/$3) \
+Gemini-3-Flash-Preview($0.50/$3) GPT-5.3-Codex($1.75/$14) \
 GPT-5.4($2.50/$15) Claude-Sonnet-4.6($3/$15) Claude-Opus-4.6($5/$25) \
 Question: {question}
 """
@@ -30,7 +30,6 @@ _NAME_MAP = {
     "gemini-2.5-flash": "gemini-2.5-flash",
     "kimi-k2.5": "kimi-k2.5",
     "gemini-3-flash-preview": "gemini-3-flash-preview",
-    "claude-haiku-4.5": "claude-haiku-4-5-20251001",
     "gpt-5.3-codex": "gpt-5.3-codex",
     "gpt-5.4": "gpt-5.4",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
@@ -39,7 +38,7 @@ _NAME_MAP = {
 
 _FUZZY = [
     ("codex", "gpt-5.3-codex"), ("5.4", "gpt-5.4"), ("opus", "claude-opus-4-6"),
-    ("sonnet", "claude-sonnet-4-6"), ("haiku", "claude-haiku-4-5-20251001"),
+    ("sonnet", "claude-sonnet-4-6"),
     ("flash-lite", "gemini-2.5-flash-lite"), ("flash-preview", "gemini-3-flash-preview"),
     ("flash", "gemini-2.5-flash"), ("kimi", "kimi-k2.5"),
     ("gpt", "gpt-5.4"), ("claude", "claude-sonnet-4-6"), ("gemini", "gemini-2.5-flash"),

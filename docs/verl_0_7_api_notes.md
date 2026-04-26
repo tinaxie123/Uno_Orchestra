@@ -389,7 +389,7 @@ python scripts/rl/train_grpo.py \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     data.train_files=data/rl/train.parquet \
     data.val_files=data/rl/val.parquet \
-    actor_rollout_ref.model.path=/data/xieht/LlamaFactory/outputs/router_qwen25_7b_sft \
+    actor_rollout_ref.model.path=/data/xieht/checkpoints/Uno-Orchestra-7B-SFT \
     trainer.n_gpus_per_node=4 trainer.nnodes=1 \
     trainer.total_epochs=1
 ```
@@ -458,7 +458,7 @@ verl.trainer.main_ppo.main()
 3. **SFT byte-identity fixture still needs to be built** (Step 1).
    The fixture must use the exact tokenizer + chat template the SFT
    was trained with. Need to cross-check
-   `/data/xieht/LlamaFactory/outputs/router_qwen25_7b_sft/tokenizer_config.json`
+   `/data/xieht/checkpoints/Uno-Orchestra-7B-SFT/tokenizer_config.json`
    against what `AgentLoopBase.apply_chat_template()` would produce.
 4. **Upstream is pre-1.0 and fast-moving.** Main HEAD is already
    `0.8.0.dev`. We should pin to tag `v0.7.0` (`f9c855f`) for the

@@ -42,6 +42,31 @@ EXP_NAME="${EXP_NAME:-uno-orchestra-grpo}"
 PROJECT_NAME="${PROJECT_NAME:-uno-orchestra}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
+# First-surface evidence: a fixed banner so any 0-byte / silent-exit log is
+# instantly distinguishable from a real failure deeper in verl. Print BEFORE
+# `set -x` echoes the python invocation so this stays at the top of the log.
+{ set +x; } 2>/dev/null
+echo "============================================================"
+echo " Uno-Orchestra GRPO smoke — $(date -Is)"
+echo "============================================================"
+echo " host           : $(hostname)"
+echo " pwd            : $(pwd)"
+echo " git HEAD       : $(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')"
+echo " python         : $(command -v "$PYTHON_BIN")"
+echo " python version : $("$PYTHON_BIN" -V 2>&1)"
+echo " CUDA_VISIBLE   : ${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo " MODEL_PATH     : $MODEL_PATH"
+echo " TRAIN_PARQUET  : $TRAIN_PARQUET"
+echo " VAL_PARQUET    : $VAL_PARQUET"
+echo " PROJECT_NAME   : $PROJECT_NAME"
+echo " EXP_NAME       : $EXP_NAME"
+echo " extra args     : $*"
+echo "============================================================"
+[[ -e "$MODEL_PATH" ]]      || { echo "FATAL: MODEL_PATH not found"   >&2; exit 2; }
+[[ -e "$TRAIN_PARQUET" ]]   || { echo "FATAL: TRAIN_PARQUET not found">&2; exit 2; }
+[[ -e "$VAL_PARQUET" ]]     || { echo "FATAL: VAL_PARQUET not found"  >&2; exit 2; }
+set -x
+
 "$PYTHON_BIN" -m verl.trainer.main_ppo \
     --config-path="$BASE_CONFIG_PATH" \
     --config-name='gsm8k_multiturn_grpo' \

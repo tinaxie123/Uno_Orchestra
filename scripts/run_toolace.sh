@@ -10,8 +10,8 @@ ROUTER_MODEL="Qwen/Qwen2.5-7B-Instruct"
 ROUTER_API_BASE="http://localhost:8236/v1"
 
 # Teacher + Sub-agent
-API_BASE="https://open.xiaojingai.com/v1/"
-API_KEY="sk-wFh8h2dhytX3J7ywOZld4IVWoEoBr8hZ8DonD60UYHDZSrYT"
+API_BASE="${REMOTE_API_BASE:-https://open.xiaojingai.com/v1/}"
+API_KEY="${REMOTE_API_KEY:?set REMOTE_API_KEY in your shell env}"
 TEACHER_MODEL="qwen3.5-plus"
 
 OUT_DIR="${REPO_ROOT}/data/sft/round1_toolace"

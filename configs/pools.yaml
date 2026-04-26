@@ -11,16 +11,16 @@ models:
     allowed_skills: [direct_answer, web_search, read_document, extract_field]
 
   - id: gemini-2.5-flash
-    usd_per_1m_input: 0.15
-    usd_per_1m_output: 0.60
+    usd_per_1m_input: 0.30
+    usd_per_1m_output: 2.50
     description: >
       Google's fast budget model. 1M context, ~201 tok/s. Good for summarization,
       chatbots, production pipelines. Not for complex math or deep reasoning.
     allowed_skills: [direct_answer, web_search, read_document, extract_field]
 
   - id: kimi-k2.5
-    usd_per_1m_input: 0.35
-    usd_per_1m_output: 2.50
+    usd_per_1m_input: 0.60
+    usd_per_1m_output: 3.00
     description: >
       Moonshot AI's open-source MoE (1T params, 32B active). Strong coding,
       document processing, Chinese support. Lacks symbolic math.
@@ -33,14 +33,6 @@ models:
       Google's high-speed thinking model. 1M context. Near-Pro reasoning with
       Flash-line latency. Configurable thinking levels. Best mid-tier all-rounder.
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
-
-  - id: gemini-3.1-pro-preview
-    usd_per_1m_input: 2.50
-    usd_per_1m_output: 12.00
-    description: >
-      Google's flagship reasoning model. 2M context, native multimodal.
-      Strong math, coding, and agentic tasks. Good cost-performance ratio.
-    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
   - id: gpt-5.3-codex
     usd_per_1m_input: 1.75
@@ -67,8 +59,8 @@ models:
     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
 
   - id: claude-opus-4-6
-    usd_per_1m_input: 15.00
-    usd_per_1m_output: 75.00
+    usd_per_1m_input: 5.00
+    usd_per_1m_output: 25.00
     description: >
       Anthropic's most capable model. 80.8% SWE-bench Verified. 1M context,
       128K output. Thinks between tool calls. Reserve for hardest tasks only.
@@ -108,6 +100,6 @@ pool_ablations:
   minimal:
     include: [gemini-2.5-flash, gemini-3-flash-preview, gpt-5.4]
   mid_only:
-    include: [gemini-3-flash-preview, gpt-5.3-codex, gemini-3.1-pro-preview]
+    include: [gemini-3-flash-preview, gpt-5.3-codex, claude-sonnet-4-6]
   pro_only:
-    include: [gemini-3.1-pro-preview, gpt-5.3-codex, gpt-5.4, claude-sonnet-4-6]
+    include: [gpt-5.3-codex, gpt-5.4, claude-sonnet-4-6, claude-opus-4-6]

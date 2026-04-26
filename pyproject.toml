@@ -42,6 +42,9 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
+# `verl` is vendored as a read-only source tree at the repo root and reachable
+# via the launcher's sys.path injection; it is intentionally excluded from the
+# project's installable package set.
 include = ["configs*", "scripts*", "eval_pipeline*", "agent_system*"]
 
 [tool.ruff]
