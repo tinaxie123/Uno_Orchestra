@@ -33,6 +33,7 @@ Known v1 simplifications (to be revisited in follow-up commits):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -91,6 +92,18 @@ class UnoAgentLoop(AgentLoopBase):
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        # Diagnostic for the v3-v8 hang: AgentLoopBase.__init__ captures
+        # `self.loop = get_event_loop()` in the Ray actor's sync init context,
+        # which may not be the same loop that `run()` actually executes on.
+        # If the IDs differ, every `await self.loop.run_in_executor(...)` would
+        # silently submit to a non-running loop and deadlock. Always use the
+        # running loop instead (this is what upstream ToolAgentLoop does).
+        loop = asyncio.get_running_loop()
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "uno run() loop ids: running=%s self.loop=%s match=%s",
+                id(loop), id(self.loop), id(loop) == id(self.loop),
+            )
         messages = list(kwargs["raw_prompt"])
         extra_info = dict(kwargs.get("extra_info") or {})
         env_kwargs = dict(extra_info.get("env_kwargs") or {})
@@ -138,7 +151,7 @@ class UnoAgentLoop(AgentLoopBase):
             if len(response_mask) >= self.response_length:
                 done_reason = "response_length"
                 break
-            turn_text = await self.loop.run_in_executor(
+            turn_text = await loop.run_in_executor(
                 None,
                 lambda ids=turn_ids: self.tokenizer.decode(
                     ids, skip_special_tokens=True
@@ -150,7 +163,7 @@ class UnoAgentLoop(AgentLoopBase):
             # the same worker — that's the v3-v6b smoke hang.
             # Default-arg lambda binds turn_text at definition time, since
             # the variable is reassigned each iteration of the outer loop.
-            step = await self.loop.run_in_executor(
+            step = await loop.run_in_executor(
                 None,
                 lambda t=turn_text: env.step(t),
             )
@@ -175,13 +188,44 @@ class UnoAgentLoop(AgentLoopBase):
             if not obs_content:
                 continue
 
-            obs_messages = [{"role": "user", "content": obs_content}]
+            # SFT was done with LlamaFactory's qwen template, whose
+            # `format_observation` emits:
+            #     <|im_start|>user\n<tool_response>\n{content}\n</tool_response>
+            #         <|im_end|>\n<|im_start|>assistant\n
+            # The bundled Qwen2.5 chat_template reproduces this exactly when
+            # rendered with role="tool" (it auto-wraps tool messages in the
+            # <tool_response> envelope under role=user). Using role="user"
+            # would emit a bare `<|im_start|>user\n{content}…` block — one+
+            # tokens off from SFT, which is what drove turn-2 format_error
+            # under the v3-v8 stack. apply_chat_template + remove_system_prompt
+            # is the same path upstream ToolAgentLoop uses.
+            obs_messages = [{"role": "tool", "content": obs_content}]
             obs_ids = await self.apply_chat_template(
                 obs_messages, remove_system_prompt=True
             )
             full_ids.extend(obs_ids)
             response_mask.extend([0] * len(obs_ids))
             n_obs_tokens += len(obs_ids)
+            # One-shot byte-sanity log per agent-loop actor — decode the
+            # last 200 tokens after the first obs splice and emit at INFO,
+            # so a smoke run yields visual evidence that what the model
+            # sees at turn 2 matches the LlamaFactory SFT framing.
+            if (
+                not getattr(UnoAgentLoop, "_byte_sanity_logged", False)
+                and logger.isEnabledFor(logging.INFO)
+            ):
+                tail_ids = full_ids[-200:]
+                tail_text = await loop.run_in_executor(
+                    None,
+                    lambda ids=tail_ids: self.tokenizer.decode(
+                        ids, skip_special_tokens=False
+                    ),
+                )
+                logger.info(
+                    "uno byte-sanity (first obs splice, last 200 tok): %r",
+                    tail_text,
+                )
+                UnoAgentLoop._byte_sanity_logged = True
 
             if len(response_mask) >= self.response_length:
                 done_reason = "response_length"
