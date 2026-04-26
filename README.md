@@ -310,9 +310,47 @@ trainer.train(); trainer.save_model("/home/xieht/data/sft/router_final")
 - terminal & wrong → 0.0
 - terminal & correct → $(1-\alpha)\cdot 1 + \alpha\cdot R_{\text{cost}}$, $\alpha=0.1$. $R_{\text{cost}}\in[0,1]$ is a rolling-percentile normalised cost reward: $R_{\text{cost}} = 1 - \mathrm{clip}\!\big((\sqrt{c} - p_{5}) / (p_{95}-p_{5}),\,0,\,1\big)$ over a 1000-episode rolling buffer, so a single Opus outlier can't saturate the signal and no budget-cap magic number needs tuning.
 
-Worker calls go through the **xiaojingai proxy**, which serves each of the 10 closed-vocabulary model names with authentic frontier pricing. Token usage is read from the API response for cost accounting; per-model `max_tokens` caps bound the episodic cost; a hard per-episode USD ceiling early-terminates any runaway rollout.
+Worker calls are issued through an OpenAI-compatible HTTPS endpoint configured by the `REMOTE_API_BASE` / `REMOTE_API_KEY` environment variables (`agent_system/environments/env_package/uno/envs.py`), so the same rollout code can target any provider gateway. The router's `(model, skill)` choice is forwarded verbatim — no tier remap — so the **routed** model is the model that actually runs and cost / quality differences are authentic. Token usage is read from the API response for cost accounting; per-model `max_tokens` caps bound the episodic cost; a hard per-episode USD ceiling early-terminates any runaway rollout.
 
-## 🥦 Error Taxonomy
+## 🎻 Worker Pool
+
+The router dispatches every subtask to a `(model, skill)` pair drawn from a closed vocabulary of **8 worker models** and **13 skills** (`configs/pools.yaml`). The closed-vocabulary constraint keeps the action space discrete and tractable for GRPO; the heterogeneous pricing structure is what gives the cost-aware reward a non-trivial signal to optimise.
+
+| Model | $/M input | $/M output | Allowed skills |
+|---|--:|--:|---|
+| `gemini-2.5-flash-lite` | 0.10 | 0.40 | direct_answer, web_search, read_document, extract_field |
+| `gemini-2.5-flash` | 0.30 | 2.50 | direct_answer, web_search, read_document, extract_field |
+| `gemini-3-flash-preview` | 0.50 | 3.00 | all 13 skills |
+| `kimi-k2.5` | 0.60 | 3.00 | direct_answer, reason, web_search, read_document, extract_field, fact_check |
+| `gpt-5.3-codex` | 1.75 | 14.00 | direct_answer, symbolic_math, execute_python, execute_shell, call_api, read_code, parse_structured |
+| `gpt-5.4` | 2.50 | 15.00 | all 13 skills |
+| `claude-sonnet-4-6` | 3.00 | 15.00 | all 13 skills |
+| `claude-opus-4-6` | 5.00 | 25.00 | all 13 skills |
+
+**Cost spread.** Output prices span \$0.40 / M tokens (`gemini-2.5-flash-lite`) to \$25.00 / M tokens (`claude-opus-4-6`) — a **62.5×** ratio ($25.00 / \$0.40$) between the cheapest and most expensive worker. This dynamic range matters because the rolling-percentile cost reward $R_{\text{cost}}$ (§ RL Training) reads its bounds from the empirical $p_5$ / $p_{95}$ of the past 1,000 episodes: with a 62.5× spread the percentile gap is wide relative to per-call token noise, so a single Opus outlier cannot saturate $R_{\text{cost}}$ to 0 and a single Flash-lite call cannot push it to 1. A pool with a < 5× spread, by contrast, would collapse $R_{\text{cost}}$ into noise and the cost-aware blend at $\alpha = 0.1$ would degenerate to a pure-correctness reward.
+
+**Skills (13 total),** grouped by routing semantics:
+
+| Group | Skills |
+|---|---|
+| Answer & reason | `direct_answer`, `reason` |
+| Retrieve | `web_search`, `database_query`, `fact_check` |
+| Read & extract | `read_document`, `read_code`, `extract_field`, `parse_structured` |
+| Execute | `execute_python`, `execute_shell`, `call_api` |
+| Symbolic | `symbolic_math` |
+
+The model–skill bipartite graph is intentionally **sparse**: roughly 60 valid `(model, skill)` pairs out of the dense 8 × 13 = 104, because cheap models advertise only the skills on which they are competitive. This sparsity prunes routing decisions that are trivially wrong (e.g. `symbolic_math` on `gemini-2.5-flash-lite`) before learning begins, and shrinks the effective action space the router has to explore under GRPO.
+
+**Pool ablations** (`pool_ablations:` in `configs/pools.yaml`) — four pre-defined sub-pools used in the ablation study:
+
+| Pool | Composition | What it isolates |
+|---|---|---|
+| `no_frontier` | drops `claude-opus-4-6`, `gpt-5.4`, `claude-sonnet-4-6` | router behaviour when no frontier worker is reachable |
+| `minimal` | `gemini-2.5-flash`, `gemini-3-flash-preview`, `gpt-5.4` | minimum pool size at which routing is non-trivial |
+| `mid_only` | `gemini-3-flash-preview`, `gpt-5.3-codex`, `claude-sonnet-4-6` | "decompose well" decoupled from "pick the strongest" |
+| `pro_only` | `gpt-5.3-codex`, `gpt-5.4`, `claude-sonnet-4-6`, `claude-opus-4-6` | quality-only regime — cost reward effectively flattened |
+
+## 🍋 Error Taxonomy
 
 > Scope: every failing rollout in the tables below is a **real interaction-mode router trajectory** — the 7B router ran end-to-end through the pipeline (plan → route → real worker API / code executor / tool-schema call → obs → verify → final_answer), and only these execution-grounded rollouts are analysed here. Rollouts that never reached a real worker invocation (e.g. empty outputs, immediate format crashes) are excluded so each failure can be attributed to a concrete routing / worker-response interaction rather than an SFT-warmup artefact. The seven benchmarks in the audit (GSM8K, NuminaMath, DROP, HotpotQA, MuSiQue, TACO, ToolACE) also align exactly with the RL evaluation pool, so every failure mode here is a failure we can later address with RL reward shaping.
 
@@ -438,26 +476,29 @@ We also evaluate a smaller router (Qwen3-4B-Instruct) on the same pipeline. Its 
 
 The 7B router's failures are dominated by *capability* limitations (wrong answers), while the 4B router fails almost exclusively at *protocol compliance* (unable to produce valid tool calls or a terminal finish action). This suggests protocol-following ability is a prerequisite that emerges between 4B and 7B scale: SFT for the 4B model should prioritize format compliance before routing quality, whereas SFT for the 7B model can target content-level delegation decisions directly.
 
-### Worker Pool
-
-10 models across 4 providers, 13 skills. Output cost ranges from \$0.40/M (gemini-2.5-flash-lite) to \$75/M (claude-opus-4-6). The router learns to balance accuracy vs cost — picking cheap models for easy subtasks and expensive models only when needed. Full definition in `configs/pools.yaml`.
-
 ## 🧪 Evaluation
 
-Unified eval pipeline supporting any router on any benchmark:
+A unified eval pipeline (`eval_pipeline/`) drives any router against any benchmark via a uniform `(question, gold, verify_fn)` adapter. Coverage spans **13 benchmarks** organised along the same capability axes used to construct the training corpus, so generalisation can be read axis-by-axis rather than as a single aggregate score.
+
+| Capability axis | Benchmarks | Verifier |
+|---|---|---|
+| **Agentic / SWE** | SWE-bench (500 instances), Terminal-Bench (89 tasks) | `swebench.harness.run_evaluation` Docker apply + test suite; Harbor Docker container per task with `test.sh` |
+| **Generalist agent** | GAIA | per-task answer normalisation |
+| **Tool use** | ToolBench, ToolACE (held-out) | tool-call schema match + gold-trace match |
+| **Code** | HumanEval, MBPP, LiveCodeBench | unit tests in sandbox |
+| **Math** | GSM8K, MATH, AIME | symbolic equivalence + numeric tolerance |
+| **Knowledge / reasoning** | MMLU, GPQA | exact match / multiple-choice |
+| **Multi-hop QA** | DROP, HotpotQA, MuSiQue | per-source verifier (EM / F1 / numeric) |
+| **Long context** | MRCR | retrieval-aware match |
+
+All 13 adapters live under `eval_pipeline/benchmarks/` and share the same router-agnostic interface.
 
 ```bash
 python -m eval_pipeline.run --router ROUTER --bench BENCH --api_key KEY
 
-# Routers:    router-r1, uno-sft, uno-rl, direct,
-#             random, oracle-cheapest, router+claude, oracle-codex
-# Benchmarks: swebench (500 instances), terminalbench (89 tasks),
-#             plus the 7-source held-out RL pool
+# Routers:    uno-sft, uno-rl, direct, random,
+#             oracle-cheapest, oracle-codex, router+claude, router-r1
 ```
-
-Verification uses official methods:
-- **SWE-bench**: `swebench.harness.run_evaluation` (Docker apply + test suite)
-- **Terminal-Bench**: Harbor Docker (container per task, `test.sh` verification)
 
 ### Baselines
 
@@ -497,7 +538,7 @@ multiagentRL/
   scripts/
     data/                      # Teacher distillation scripts
     sft/                       # SFT training scripts
-    rl/                        # GiGPO / GRPO RL training scripts
+    rl/                        # GRPO RL training scripts
   eval_pipeline/
     config.py                  # Model pool, costs, skills
     run.py                     # Main entry point
