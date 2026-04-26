@@ -113,7 +113,7 @@ HuggingFace Datasets (31 sources, 10 domains)
         │                - 2 epochs, lr=2e-5, DeepSpeed ZeRO-3, packing on
         ▼
 [4] RL Training (verl-agent, GRPO)  Cost-aware reinforcement learning
-        │                - Real worker-API calls via the xiaojingai proxy
+        │                - Real worker-API calls 
         │                - Per-source verifiers (math / qa / code / tool)
         │                - Terminal reward = (1−α)·correctness + α·cost_bonus
         ▼
