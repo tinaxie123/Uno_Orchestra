@@ -21,6 +21,13 @@ from .utils import check_correctness as apps_check_correctness
 def compute_score(completion, test_cases, continuous=False):
     # try to get code solution from completion. if the completion is pure code, this will not take effect.
     solution = completion.split("```python")[-1].split("```")[0]
+    # Defensive init: with continuous=False, neither `success` nor `metadata_list`
+    # is assigned along the failing-bulk-test path, which lets the `return` at
+    # the bottom raise UnboundLocalError. The outer caller (code_verifier.py)
+    # catches it as Exception → False so the binary signal stays correct, but
+    # tracebacks spam the worker logs and obscure real errors.
+    success = False
+    metadata_list = None
     try:
         try:
             if not isinstance(test_cases, dict):
