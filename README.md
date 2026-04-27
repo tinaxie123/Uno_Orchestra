@@ -318,14 +318,14 @@ The RL phase optimises the same policy $\pi_\theta$ initialised from SFT, on the
 
 A rollout is a *multi-turn* trajectory of up to $T = 5$ assistant turns interleaved with environment-injected observations. At turn $t$ the policy emits a `<plan>` block followed by one or more `<route>` commitments; the environment dispatches each `<route>` to a real worker model–skill pair via the OpenAI-compatible HTTPS gateway, blocks for the response, and re-injects the concatenated `<obs>` block as a `tool`-role chat turn (apply_chat_template with `remove_system_prompt=True` and a single-byte `\n` guard before the splice, reproducing LlamaFactory's `format_observation` exactly). The trajectory terminates when the policy emits `<final_answer>...</final_answer>`, when the cumulative response length exceeds the rollout budget $L = 16{,}384$, or when $T$ assistant rounds are exhausted. Per-source verifiers (math equivalence, QA EM/F1, code unit-test execution against TACO/codecontests stdin/stdout tests, ToolACE schema match) score the final answer to produce a binary correctness signal $c \in \{0, 1\}$.
 
-For each prompt we draw $G = 8$ independent rollouts under the current policy. Verl's agent-loop runtime (`AgentLoopWorker × G` against a shared async vLLM server) executes them concurrently; each worker issues sub-agent HTTP calls through `loop.run_in_executor(...)` so the policy server's event loop is never blocked by remote-API latency. This is what makes multi-turn rollout tractable at $G \times \text{batch\_size}$ on a single node.
+For each prompt we draw $G = 8$ independent rollouts under the current policy. Verl's agent-loop runtime (`AgentLoopWorker × G` against a shared async vLLM server) executes them concurrently; each worker issues sub-agent HTTP calls through `loop.run_in_executor(...)` so the policy server's event loop is never blocked by remote-API latency. This is what makes multi-turn rollout tractable at $G \times B$ trajectories per step (where $B$ is the prompt batch size) on a single node.
 
 #### 🍏 Group-relative objective
 
 Let a trajectory be $\tau = (q,\, a_1,\, o_1,\, a_2,\, o_2, \ldots,\, a_{T'})$ where $q$ is the question, $a_t$ is the policy-emitted assistant turn, $o_t$ is the worker-returned observation, and $T' \le T$ is the realised number of rounds. Tokenise $\tau$ into a single sequence and let $m_{i,t} \in \{0, 1\}$ be a **policy mask** that is 1 on every token emitted by $\pi_\theta$ and 0 on every observation token and every chat-template control token. A trajectory-level scalar reward
 
 $$
-R(\tau) = c \cdot \big[(1-\alpha) + \alpha \cdot R_{\text{cost}}(\tau)\big], \qquad \alpha = 0.1, \tag{4}
+R(\tau) = c \cdot \big[(1-\alpha) + \alpha \cdot R_{\text{cost}}(\tau)\big], \quad \alpha = 0.1. \qquad (4)
 $$
 
 is placed at the **last policy token** of $\tau$ — at index $t^{\star} = \max\{t : m_{i,t} = 1\}$ — yielding a token-level reward tensor $r_{i,t}$ that is zero everywhere except at $t^{\star}$. Placement on the last *valid* token (the standard outcome-RM convention) would land inside an `<obs>` span whenever a rollout is truncated mid-route, since `response_mask` is interleaved $1{\cdot}1{\cdots}0{\cdot}0{\cdots}1{\cdot}1{\cdots}$ across alternating policy / observation turns; the policy-mask convention guarantees the gradient lands on a token $\pi_\theta$ actually emitted (`scripts/rl/uno_reward.py:107`).
@@ -333,7 +333,7 @@ is placed at the **last policy token** of $\tau$ — at index $t^{\star} = \max\
 For each question $q$ we form the group $\mathcal{G}_q = \{\tau_1, \ldots, \tau_G\}$ of its $G = 8$ rollouts. The **group-relative advantage** for the $i$-th rollout is
 
 $$
-\hat{A}_i = \frac{R(\tau_i) - \mu_q}{\sigma_q + \varepsilon}, \quad \mu_q = \tfrac{1}{G}\sum_{j \in \mathcal{G}_q} R(\tau_j), \quad \sigma_q = \mathrm{std}_{\mathcal{G}_q}\,R(\tau_j), \tag{5}
+\hat{A}_i = \frac{R(\tau_i) - \mu_q}{\sigma_q + \varepsilon}, \quad \mu_q = \tfrac{1}{G}\sum_{j \in \mathcal{G}_q} R(\tau_j), \quad \sigma_q = \mathrm{std}_{\mathcal{G}_q}\,R(\tau_j). \qquad (5)
 $$
 
 and is broadcast token-wise as $\hat{A}_{i,t} = \hat{A}_i \cdot m_{i,t}$. Equation (5) is the GRPO baseline of [Shao et al., 2024]: the within-group mean replaces a learned critic, and the within-group standard deviation rescales the advantage so updates remain bounded under reward-distribution shift across questions of heterogeneous difficulty (math vs. multi-hop QA vs. tool orchestration). Crucially, when an entire group fails ($\mu_q = 0,\,\sigma_q = 0$) the advantage is exactly zero and the policy receives no spurious signal from prompts it cannot yet solve — the ill-posed credit-assignment problem on hopeless questions is structurally avoided rather than heuristically masked.
@@ -341,7 +341,7 @@ and is broadcast token-wise as $\hat{A}_{i,t} = \hat{A}_i \cdot m_{i,t}$. Equati
 The actor objective is the standard PPO surrogate restricted to policy tokens, with an additive low-variance KL regulariser to a frozen reference policy $\pi_{\text{ref}}$ (the SFT checkpoint):
 
 $$
-\mathcal{L}(\theta) \;=\; -\,\mathbb{E}_{\tau \sim \pi_{\theta_{\text{old}}}}\!\left[\sum_{i,t} m_{i,t}\, \min\!\Big(\rho_{i,t}\,\hat{A}_{i,t},\; \mathrm{clip}(\rho_{i,t}, 1{-}\epsilon, 1{+}\epsilon)\,\hat{A}_{i,t}\Big)\right] \;+\; \beta\,\hat{D}_{\text{KL}}\!\big[\pi_\theta \,\Vert\, \pi_{\text{ref}}\big], \tag{6}
+\mathcal{L}(\theta) = -\,\mathbb{E}_{\tau \sim \pi_{\theta_{\text{old}}}}\!\left[\sum_{i,t} m_{i,t}\, \min\!\Big(\rho_{i,t}\,\hat{A}_{i,t},\; \mathrm{clip}(\rho_{i,t}, 1-\epsilon, 1+\epsilon)\,\hat{A}_{i,t}\Big)\right] + \beta\,\hat{D}_{\text{KL}}\!\big[\pi_\theta \,\Vert\, \pi_{\text{ref}}\big]. \qquad (6)
 $$
 
 where $\rho_{i,t} = \pi_\theta(x_{i,t}\mid s_{i,t}) / \pi_{\theta_{\text{old}}}(x_{i,t}\mid s_{i,t})$ is the per-token importance ratio, $\hat{D}_{\text{KL}} = \rho - \log\rho - 1$ is the unbiased low-variance KL estimator of [Schulman, 2020] (`kl_loss_type=low_var_kl`), and $(\beta,\,\epsilon) = (10^{-3},\, 0.2)$. Three design choices follow from the multi-turn structure of $\tau$:
