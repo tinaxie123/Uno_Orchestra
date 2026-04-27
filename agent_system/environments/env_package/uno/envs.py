@@ -177,7 +177,16 @@ def _get_api_client():
         "REMOTE_API_BASE",
         "https://open.xiaojingai.com/v1/",
     )
-    return openai.OpenAI(api_key=api_key, base_url=base_url)
+    # Cap per-call latency so a single hung worker can't deadlock the whole
+    # rollout's asyncio.gather. Default openai-python timeout is 600s + 2
+    # auto-retries (~30 min worst case) — that masks as a "step 2 hang" in
+    # GRPO. 60s + 1 retry caps a single sub-agent call at ~120s.
+    return openai.OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=60.0,
+        max_retries=1,
+    )
 
 
 def call_sub_agent_api(model: str, skill: str, query: str, question: str) -> Tuple[str, int]:
