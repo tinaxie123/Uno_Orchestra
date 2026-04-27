@@ -9,14 +9,14 @@ from typing import List
 
 @dataclass
 class RouteResult:
- 
-    answer: str                         
-    full_trace: str = ""                
-    route_count: int = 0                、
-    routed_models: List[str] = field(default_factory=list)  
-    routed_skills: List[str] = field(default_factory=list)  
-    total_cost: float = 0.0             
-    total_tokens: int = 0              
+
+    answer: str
+    full_trace: str = ""
+    route_count: int = 0
+    routed_models: List[str] = field(default_factory=list)
+    routed_skills: List[str] = field(default_factory=list)
+    total_cost: float = 0.0
+    total_tokens: int = 0
 
 
 class BaseRouter(ABC):
@@ -29,7 +29,7 @@ class BaseRouter(ABC):
 
     @abstractmethod
     def route(self, question: str, context: dict = None) -> RouteResult:
-      
+
         ...
     def chat_completions(self, messages, tools=None, **kwargs):
         """Multi-turn chat-completions call with optional tool definitions.

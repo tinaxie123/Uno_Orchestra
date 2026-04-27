@@ -20,7 +20,7 @@
   "obs_turn_texts": [
     "<obs subtask=\"1\">4</obs>"
   ],
-  "tokenizer_path": "/data/xieht/checkpoints/Uno-Orchestra-7B-SFT",
+  "tokenizer_path": "/data/xieht/LlamaFactory/outputs/router_qwen25_7b_sft_clean/checkpoint-232",
   "expected_prompt_ids": [
     151644,
     8948,
