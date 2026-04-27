@@ -1,0 +1,2099 @@
+diff --git a/README.md b/README.md
+index cdd306c..c9fd9dd 100644
+--- a/README.md
++++ b/README.md
+@@ -39,7 +39,7 @@ The router learns four behaviors: lazy (direct answer), one-shot decomposition,
+ 
+ ### Worker Pool
+ 
+-9 models across 5 families, 13 skills. Cost ranges from $1.25/M tokens (haiku) to $75/M tokens (opus). The router learns to balance accuracy vs cost -- picking cheap models for easy subtasks and expensive models only when needed. Full definition in `configs/pools.yaml`.
++9 models across 4 providers (no Qwen in sub-agent pool), 13 skills. Output cost ranges from $0.40/M (gemini-2.5-flash-lite) to $25/M (claude-opus-4.6). The router learns to balance accuracy vs cost -- picking cheap models for easy subtasks and expensive models only when needed. Full definition in `configs/pools.yaml`.
+ 
+ ### Training Pipeline
+ 
+diff --git a/agent_system/environments/env_package/skillrouter/env_manager.py b/agent_system/environments/env_package/skillrouter/env_manager.py
+index bec379d..58a87d0 100644
+--- a/agent_system/environments/env_package/skillrouter/env_manager.py
++++ b/agent_system/environments/env_package/skillrouter/env_manager.py
+@@ -1,14 +1,7 @@
+-"""
+-SkillRouter Environment Manager for verl-agent.
+-Wraps SkillRouterMultiProcessEnv with the verl-agent interface.
+-"""
+-
+ import os
+ from typing import List, Tuple, Dict, Any
+ import numpy as np
+ from agent_system.environments.base import EnvironmentManagerBase, to_numpy
+-
+-# Load system prompt once
+ _SYSTEM_PROMPT_PATH = os.environ.get(
+     "SKILLROUTER_SYSTEM_PROMPT",
+     "/home/xieht/data/sft/system_prompt.txt"
+@@ -38,12 +31,7 @@ Continue the trajectory. Generate <verify> and either <final_answer> or a repair
+ 
+ 
+ class SkillRouterEnvironmentManager(EnvironmentManagerBase):
+-    """
+-    EnvironmentManager for SkillRouter.
+-
+-    The system prompt + question + history are all embedded in the obs text,
+-    because verl-agent passes obs_text directly as the user message content.
+-    """
++  
+ 
+     def __init__(self, envs, projection_f, config):
+         super().__init__(envs, projection_f, config)
+diff --git a/agent_system/environments/env_package/skillrouter/envs.py b/agent_system/environments/env_package/skillrouter/envs.py
+index bb0468c..14db2c6 100644
+--- a/agent_system/environments/env_package/skillrouter/envs.py
++++ b/agent_system/environments/env_package/skillrouter/envs.py
+@@ -1,20 +1,3 @@
+-"""
+-SkillRouter Environment for verl-agent.
+-
+-Each episode:
+-1. Model receives a question
+-2. Model generates <plan> + <route> tags (assistant turn)
+-3. Environment parses routes, calls real LLM API as sub-agent, returns <obs>
+-4. Model generates <verify> + optionally <final_answer> or repair <plan>
+-5. Repeat until <final_answer> or max_steps
+-
+-Reward: Router-R1 style R = (1-α)*R_outcome + α*R_cost
+-
+-Sub-agent: real API calls to qwen-plus via DashScope.
+-Every route gets a real LLM response regardless of skill choice.
+-The model must learn which (model, skill) combination actually works.
+-"""
+-
+ import re
+ import string
+ import concurrent.futures
+@@ -30,14 +13,10 @@ try:
+     import openai
+ except ImportError:
+     openai = None
+-
+-# Load model pool from configs/pools.yaml (single source of truth)
+ sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "../../../../..")))
+ from configs import load_pools as _load_pools
+ 
+ _pools = _load_pools()
+-
+-# --- Schema v1.1 Parsers ---
+ PLAN_RE = re.compile(r'<plan round="(\d+)">(.*?)</plan>', re.DOTALL)
+ SUBTASK_RE = re.compile(r'<subtask id="(\d+)" depends_on="([^"]*)">(.*?)</subtask>', re.DOTALL)
+ ROUTE_RE = re.compile(
+@@ -46,18 +25,15 @@ ROUTE_RE = re.compile(
+ )
+ FINAL_RE = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
+ 
+-# Valid pools — from pools.yaml
+ VALID_MODELS = set(_pools["models"])
+ VALID_SKILLS = set(_pools["skills"])
+ 
+-# Per-token cost (USD per 1M output tokens) — from pools.yaml
+ MODEL_COST_PER_M_TOKENS = _pools["cost_per_m"]
+ DEFAULT_ALPHA = 0.1
+-COST_WINDOW_SIZE = 1000  # rolling window for percentile normalization
++COST_WINDOW_SIZE = 1000  
+ COST_PERCENTILE_LO = 5
+ COST_PERCENTILE_HI = 95
+ 
+-# Skill → system prompt for sub-agent
+ SKILL_PROMPTS = {
+     "direct_answer": "Answer the following question directly and concisely.",
+     "reason": "Reason step by step about the following question, then give a final answer.",
+@@ -75,21 +51,16 @@ SKILL_PROMPTS = {
+ }
+ 
+ 
+-# Map router's model pool → (DashScope model, max_tokens)
+-# Different tiers get different models AND token budgets
+ ROUTER_TO_DASHSCOPE = {
+-    # nano tier → qwen-plus with low token budget (simulates weaker model)
++   
+     "claude-haiku-4-5-20251001": ("qwen-plus", 64),
+     "gemini-2.5-flash": ("qwen-plus", 64),
+-    # mid tier → qwen-plus with normal budget
+     "kimi-k2.5": ("qwen-plus", 256),
+     "claude-sonnet-4-6": ("qwen-plus", 256),
+     "gemini-3.1-pro-preview": ("qwen-plus", 256),
+     "qwen3.6-plus": ("qwen-plus", 256),
+-    # large tier → qwen-max (strongest)
+     "claude-opus-4-6": ("qwen-max", 512),
+     "gpt-5.4": ("qwen-max", 512),
+-    # code specialist → qwen-plus with code prompt
+     "gpt-5.3-codex": ("qwen-plus", 512),
+ }
+ 
+@@ -344,10 +315,10 @@ class SkillRouterMultiProcessEnv(gym.Env):
+                     else:
+                         norm_cost = 0.5
+                 else:
+-                    # Not enough data yet — use uniform prior
++                  
+                     norm_cost = 0.5
+ 
+-                r_cost = 1.0 - norm_cost  # lower cost → higher reward
++                r_cost = 1.0 - norm_cost  
+                 rewards[i] = (1 - self.alpha) * correctness + self.alpha * r_cost
+ 
+             dones[i] = result["done"]
+diff --git a/configs/__init__.py b/configs/__init__.py
+index a23afa7..9bb08dd 100644
+--- a/configs/__init__.py
++++ b/configs/__init__.py
+@@ -81,6 +81,7 @@ def load_pools(path: str | None = None) -> PoolConfig:
+         "skills": skills,
+         "model_skills": {model["id"]: model.get("allowed_skills", skills) for model in cfg["models"]},
+         "cost_per_m": {model["id"]: model["usd_per_1m_output"] for model in cfg["models"]},
++        "input_cost_per_m": {model["id"]: model.get("usd_per_1m_input", 0) for model in cfg["models"]},
+         "fallbacks": dict(cfg.get("fallbacks", {})),
+         "pool_ablations": dict(cfg.get("pool_ablations", {})),
+         "policy_models": list(cfg.get("policy_models", [])),
+diff --git a/configs/pools.yaml b/configs/pools.yaml
+index b2e1d9e..70850dd 100644
+--- a/configs/pools.yaml
++++ b/configs/pools.yaml
+@@ -3,90 +3,83 @@ policy_models:
+   - Qwen/Qwen2.5-7B-Instruct
+ models:
+   - id: gemini-2.5-flash-lite
+-    usd_per_1m_output: 0.30
++    usd_per_1m_input: 0.10
++    usd_per_1m_output: 0.40
+     description: >
+-      Google's ultra-affordable model optimized for low latency and cost efficiency.
+-      1M token context window with full multimodal support (text, image, audio, video).
+-      Thinking is disabled by default to prioritize speed. Best for high-volume,
+-      cost-sensitive tasks like classification, extraction, and simple Q&A.
+-      Limited reasoning and coding capability.
++      Google's ultra-affordable model. 1M context, multimodal.
++      Best for high-volume simple tasks. Limited reasoning/coding.
+     allowed_skills: [direct_answer, web_search, read_document, extract_field]
+ 
+   - id: gemini-2.5-flash
++    usd_per_1m_input: 0.15
+     usd_per_1m_output: 0.60
+     description: >
+-      Google's fastest and most budget-friendly model in the 2.5 family. Delivers ~201 tokens/sec
+-      with a 1M token context window. Supports text, image, audio, and video inputs.
+-      Strong at summarization, chatbots, and production pipelines. Results close to Pro quality
+-      at a fraction of the cost. Improved agentic tool use with 5% gain on SWE-Bench.
+-      Not suited for complex symbolic math or deep multi-step reasoning.
++      Google's fast budget model. 1M context, ~201 tok/s. Good for summarization,
++      chatbots, production pipelines. Not for complex math or deep reasoning.
+     allowed_skills: [direct_answer, web_search, read_document, extract_field]
+ 
+   - id: kimi-k2.5
++    usd_per_1m_input: 0.35
+     usd_per_1m_output: 2.50
+     description: >
+-      Moonshot AI's open-source MoE model (1T total params, 32B active per request).
+-      Trained on 15T tokens mixing visual and textual data from the start.
+-      Supports four modes: Instant, Thinking, Agent, and Agent Swarm (up to 100 parallel sub-agents).
+-      Strong at coding (outperforms Gemini 3 Pro on SWE-Bench Multilingual), document processing,
+-      and research. Excellent Chinese language support. Lacks dedicated symbolic math skill.
++      Moonshot AI's open-source MoE (1T params, 32B active). Strong coding,
++      document processing, Chinese support. Lacks symbolic math.
+     allowed_skills: [direct_answer, reason, web_search, read_document, extract_field, fact_check]
+ 
+-  - id: qwen3.6-plus
++  - id: gemini-3-flash-preview
++    usd_per_1m_input: 0.50
+     usd_per_1m_output: 3.00
+     description: >
+-      Alibaba's flagship model (April 2026). Hybrid architecture combining linear attention
+-      with sparse MoE routing. 1M token context window. Matches Claude Opus 4.5 on
+-      SWE-bench and Terminal-Bench 2.0. Reasoning is active by default on every prompt.
+-      Strong all-rounder for agentic coding, symbolic math, multi-step reasoning, and
+-      multimodal code generation. Best cost-performance ratio for most tasks.
+-    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
++      Google's high-speed thinking model. 1M context. Near-Pro reasoning with
++      Flash-line latency. Configurable thinking levels. Best mid-tier all-rounder.
++    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
+ 
+-  - id: gemini-3-flash-preview
++  - id: claude-haiku-4-5-20251001
++    usd_per_1m_input: 1.00
+     usd_per_1m_output: 4.00
+     description: >
+-      Google's high-speed thinking model combining Gemini 3 Pro's reasoning with Flash-line
+-      latency and efficiency. 1M token context window. Configurable reasoning via thinking
+-      levels (minimal/low/medium/high) to balance quality, latency, and cost.
+-      Near-Pro-level reasoning and tool use with substantially lower latency.
+-      Broad improvements over 2.5 Flash in reasoning, multimodal understanding, and reliability.
+-    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, call_api, parse_structured, fact_check]
++      Anthropic's fastest model. 200K context. Strong at classification,
++      extraction, simple Q&A. Best for high-volume cost-sensitive tasks.
++    allowed_skills: [direct_answer, web_search, read_document, extract_field, fact_check]
++
++  - id: gemini-3.1-pro-preview
++    usd_per_1m_input: 2.50
++    usd_per_1m_output: 12.00
++    description: >
++      Google's flagship reasoning model. 2M context, native multimodal.
++      Strong math, coding, and agentic tasks. Good cost-performance ratio.
++    allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
+ 
+   - id: gpt-5.3-codex
++    usd_per_1m_input: 1.75
+     usd_per_1m_output: 14.00
+     description: >
+-      OpenAI's advanced agentic coding model (Feb 2026). 25% faster than GPT-5.2-Codex.
+-      Tops SWE-Bench Pro and Terminal-Bench 2.0. Built for the full software lifecycle:
+-      debugging, deploying, monitoring, writing PRDs, tests, and metrics.
+-      Excels at precise symbolic computation, code generation, and structured output.
+-      Provides real-time interactive updates during execution.
++      OpenAI's advanced agentic coding model. Tops SWE-Bench Pro and Terminal-Bench 2.0.
++      Full software lifecycle: debugging, deploying, testing. Precise symbolic computation.
+     allowed_skills: [direct_answer, symbolic_math, execute_python, execute_shell, call_api, read_code, parse_structured]
+ 
+   - id: gpt-5.4
++    usd_per_1m_input: 2.50
+     usd_per_1m_output: 15.00
+     description: >
+-      OpenAI's most capable frontier model (March 2026). 1M token context window.
+-      Native computer-use capabilities. Scores 57.7% on SWE-bench Pro, 75% on OSWorld,
+-      83% on GDPval. Most token-efficient reasoning model from OpenAI. Unified architecture
+-      for coding, reasoning, and computer use. Use for hard problems where cheaper models fail.
++      OpenAI's most capable model. 1M context. Native computer-use.
++      57.7% SWE-bench Pro, 75% OSWorld. Unified coding/reasoning/computer-use.
+     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
+ 
+   - id: claude-sonnet-4-6
++    usd_per_1m_input: 3.00
+     usd_per_1m_output: 15.00
+     description: >
+-      Anthropic's fast frontier model. 79.6% on SWE-bench Verified (nearly matching Opus at 80.8%).
+-      40-60 tokens/sec with 64K output limit. 72%+ on autonomous computer use.
+-      Thinks between tool calls for more reliable agentic workflows. 40% cheaper than Opus.
+-      Ideal for routine coding, classification, and multi-step agent tasks at frontier quality.
++      Anthropic's fast frontier model. 79.6% SWE-bench Verified. 1M context,
++      40-60 tok/s. Thinks between tool calls. Ideal for coding and multi-step agents.
+     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
+ 
+   - id: claude-opus-4-6
++    usd_per_1m_input: 15.00
+     usd_per_1m_output: 75.00
+     description: >
+-      Anthropic's most capable model. 80.8% on SWE-bench Verified. 1M token context window
+-      with 128K output limit. 20-30 tokens/sec. Thinks between tool calls for reliable
+-      multi-step reasoning. Best-in-class for the hardest agentic tasks, complex code review,
+-      and long-context analysis. Very expensive — reserve for tasks where all other models fail.
++      Anthropic's most capable model. 80.8% SWE-bench Verified. 1M context,
++      128K output. Thinks between tool calls. Reserve for hardest tasks only.
+     allowed_skills: [direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, symbolic_math, execute_python, execute_shell, call_api, parse_structured, fact_check]
+ 
+ skills:
+@@ -121,6 +114,8 @@ pool_ablations:
+   no_frontier:
+     exclude: [claude-opus-4-6, gpt-5.4, claude-sonnet-4-6]
+   minimal:
+-    include: [gemini-2.5-flash, qwen3.6-plus, gpt-5.4]
++    include: [gemini-2.5-flash, gemini-3-flash-preview, gpt-5.4]
+   mid_only:
+-    include: [qwen3.6-plus, gemini-3-flash-preview, gpt-5.3-codex]
++    include: [gemini-3-flash-preview, gpt-5.3-codex, claude-haiku-4-5-20251001]
++  pro_only:
++    include: [gemini-3.1-pro-preview, gpt-5.3-codex, gpt-5.4, claude-sonnet-4-6]
+diff --git a/docs/eval_status.md b/docs/eval_status.md
+index 1d77d2f..f0d2853 100644
+--- a/docs/eval_status.md
++++ b/docs/eval_status.md
+@@ -115,19 +115,19 @@ eval_pipeline/
+ | SkillRouter-SFT | `/home/xieht/data/sft/checkpoints/router_qwen25_7b_full_sft` | 7B |
+ | Qwen2.5-7B-Instruct | `/data/xieht/models/Qwen/Qwen2.5-7B-Instruct-real` | 7B |
+ 
+-### 4.3 Cost Table (aligned with SkillRouter envs.py)
+-
+-| Model | $/1M output tokens | Tier |
+-|-------|---:|------|
+-| claude-haiku-4-5-20251001 | $1.25 | nano |
+-| gemini-2.5-flash | $1.50 | nano |
+-| kimi-k2.5 | $2.00 | large |
+-| qwen3.6-plus | $8.00 | large |
+-| gemini-3.1-pro-preview | $10.00 | large |
+-| claude-sonnet-4-6 | $15.00 | mid |
+-| gpt-5.3-codex | $20.00 | code |
+-| gpt-5.4 | $60.00 | large |
+-| claude-opus-4-6 | $75.00 | large |
++### 4.3 Cost Table (official pricing, no Qwen in sub-agent pool)
++
++| Model | $/1M input | $/1M output |
++|-------|---:|---:|
++| gemini-2.5-flash-lite | $0.10 | $0.40 |
++| gemini-2.5-flash | $0.30 | $2.50 |
++| kimi-k2.5 | $0.35 | $2.50 |
++| gemini-3-flash-preview | $0.50 | $3.00 |
++| claude-haiku-4-5-20251001 | $1.00 | $5.00 |
++| gpt-5.3-codex | $1.75 | $14.00 |
++| gpt-5.4 | $2.50 | $15.00 |
++| claude-sonnet-4-6 | $3.00 | $15.00 |
++| claude-opus-4-6 | $5.00 | $25.00 |
+ 
+ ---
+ 
+diff --git a/docs/experiment_plan.md b/docs/experiment_plan.md
+index d27f127..f05b4c3 100644
+--- a/docs/experiment_plan.md
++++ b/docs/experiment_plan.md
+@@ -101,19 +101,19 @@ Train/val source overlap: **0**.
+ 
+ **Policy model (compared)**: Qwen3-4B, Qwen2.5-7B-Instruct
+ 
+-**Worker pool**: 9 models across 5 providers (`configs/pools.yaml`)
+-
+-| Model | USD/1M output tokens |
+-|-------|---------------------|
+-| gemini-2.5-flash | $0.60 |
+-| kimi-k2.5 | $2.50 |
+-| qwen3.6-plus | $3.00 |
+-| claude-haiku-4-5-20251001 | $4.00 |
+-| gemini-3.1-pro-preview | $12.00 |
+-| gpt-5.3-codex | $14.00 |
+-| gpt-5.4 | $15.00 |
+-| claude-sonnet-4-6 | $15.00 |
+-| claude-opus-4-6 | $75.00 |
++**Worker pool**: 9 models across 4 providers, no Qwen in sub-agent pool (`configs/pools.yaml`)
++
++| Model | USD/1M input | USD/1M output |
++|-------|-------------|--------------|
++| gemini-2.5-flash-lite | $0.10 | $0.40 |
++| gemini-2.5-flash | $0.30 | $2.50 |
++| kimi-k2.5 | $0.35 | $2.50 |
++| gemini-3-flash-preview | $0.50 | $3.00 |
++| claude-haiku-4-5-20251001 | $1.00 | $5.00 |
++| gpt-5.3-codex | $1.75 | $14.00 |
++| gpt-5.4 | $2.50 | $15.00 |
++| claude-sonnet-4-6 | $3.00 | $15.00 |
++| claude-opus-4-6 | $5.00 | $25.00 |
+ 
+ **Skill pool**: 13 skills: direct_answer, reason, web_search, database_query, read_document, read_code, extract_field, parse_structured, symbolic_math, execute_python, execute_shell, fact_check, call_api.
+ 
+diff --git a/docs/figures/topology_hierarchy.pdf b/docs/figures/topology_hierarchy.pdf
+deleted file mode 100644
+index 55f180f..0000000
+Binary files a/docs/figures/topology_hierarchy.pdf and /dev/null differ
+diff --git a/docs/figures/topology_hierarchy.png b/docs/figures/topology_hierarchy.png
+deleted file mode 100644
+index 3fefd29..0000000
+Binary files a/docs/figures/topology_hierarchy.png and /dev/null differ
+diff --git a/docs/schema.md b/docs/schema.md
+deleted file mode 100644
+index 6b60da9..0000000
+--- a/docs/schema.md
++++ /dev/null
+@@ -1,289 +0,0 @@
+-# Trajectory Schema 
+-
+-**Status**: LOCKED — single source of truth for SFT data, RL data, distillation prompts, parser, env implementation, and the paper's Method section.
+-
+-**Scope**: Single-model hierarchical agent doing single-shot decomposition with iterative repair, trained with SFT warm-start + GiGPO RL.
+-
+-**Compatibility**: ChatML multi-turn, verl-agent `MultiTurnSFTDataset`, parquet storage.
+-
+-***
+-
+-## 1. Design summary
+-
+-- **One model** (Qwen2.5-7B-Instruct), no classification heads, no separate verifier.
+-- **One SFT pass** on multi-turn ChatML data; loss masked by role (assistant only).
+-- **Single-shot decomposition with iterative repair**: Leader emits a structured plan in one shot, Router assigns capabilities per subtask, Verifier checks the result, optional repair rounds (≤ 2).
+-- **Two policies in the credit-assignment sense, one network in the parameter sense.**
+-- **Capability routing, not agent orchestration**: every routed call is a stateless capability invocation; `direct_solve` is a first-class skill.
+-
+-***
+-
+-## 2. Tag definitions
+-
+-| Tag                                                          | Role                        | Required attrs                       | Optional attrs                                | Semantics                                                      |
+-| ------------------------------------------------------------ | --------------------------- | ------------------------------------ | --------------------------------------------- | -------------------------------------------------------------- |
+-| `<plan round="N">…</plan>`                                   | assistant                   | `round`                              | —                                             | Container for one decomposition round                          |
+-| `<subtask id="K" depends_on="…">…</subtask>`                 | assistant (inside `<plan>`) | `id`, `depends_on`                   | —                                             | One node in the task DAG                                       |
+-| `<route round="N" subtask="K" model="…" skill="…">…</route>` | assistant                   | `round`, `subtask`, `model`, `skill` | —                                             | Capability assignment for one subtask (Router decision anchor) |
+-| `<obs subtask="K">…</obs>`                                   | tool                        | `subtask`                            | —                                             | Environment feedback for one subtask                           |
+-| `<verify round="N" status="…" target="…">…</verify>`         | assistant                   | `round`, `status`                    | `target` (only when `status="repair_needed"`) | Verifier judgement                                             |
+-| `<final_answer>…</final_answer>`                             | assistant                   | —                                    | —                                             | Termination                                                    |
+-
+-### Removed in v1.1
+-
+-- ❌ `<think>`: not in v1.1. Distillation must not produce reasoning traces. A future v1.2 may reintroduce a short `<reasoning>` (≤ 30 words) for a high-quality subset only.
+-
+-### Closed-vocabulary attributes
+-
+-- `model` ∈ `available_models` (declared in `config/pools.yaml`).
+-- `skill` ∈ `available_skills` (declared in `config/pools.yaml`); v1.1 set is `{direct_solve, retrieval, code_exec, math_calc}`.
+-- `model` and `skill` MUST be string literals from these closed sets. Free-form values are invalid samples and are dropped by the parser.
+-
+-### Attribute conventions
+-
+-- `depends_on`: **always present**. No dependencies → `depends_on=""`. Multiple dependencies → comma-separated, ascending: `depends_on="1,2"` (not `"2,1"`).
+-- `subtask.id`: globally strictly increasing across all rounds; ids are never reused.
+-- `route.round`: must equal the `round` of the `<plan>` containing the referenced `<subtask>`.
+-- `verify.target`: only present when `status="repair_needed"`; ascending comma-separated list of subtask ids; absent when `status="pass"`.
+-- `verify.status`: strict enum `{"pass", "repair_needed"}`.
+-
+-### `skill="direct_solve"`
+-
+-- Means: invoke the chosen `model` with no external tool. The model answers from its parametric knowledge alone.
+-- This is the **collapse action**: routing a subtask to `direct_solve` is the policy declaring "no tool needed for this subtask".
+-- It is distinct from emitting `<final_answer>` directly without any `<plan>` (the *lazy mode*, which collapses the whole question to zero decomposition).
+-
+-***
+-
+-## 3. Validity constraints (parser-enforced; violating samples are discarded)
+-
+-1. Exactly one `<final_answer>`, located in the last assistant turn.
+-2. The first assistant turn satisfies one of:
+-   - **Lazy mode**: `<final_answer>` directly, with no `<plan>` and no `<route>`; **or**
+-   - **Plan mode**: a `<plan round="1">` containing ≥ 1 `<subtask>`, followed by ≥ 1 `<route round="1">`.
+-3. `<plan round="N">` rounds are strictly increasing 1, 2, 3, …; `round="1"` appears at most once.
+-4. `<subtask id="K">` ids are globally strictly increasing across the entire trajectory; ids are never reused across rounds.
+-5. **Dependency declaration**: every id referenced in `depends_on` MUST be declared somewhere in the current trajectory, MUST NOT form a cycle, and within each `<plan>` referenced dependencies MUST be declared earlier in the same plan or in previous rounds.
+-6. Every `<subtask>` that has been routed MUST receive exactly one `<obs>` with the matching `subtask` id.
+-7. `<route>`'s `round` attribute MUST equal the `round` of the `<plan>` containing the referenced `<subtask>`.
+-8. `<verify round="N">` MUST appear immediately after all `<obs>` of round N.
+-9. `<verify status="pass">` MUST be followed by `<final_answer>` (no further `<plan>`).
+-10. **`<verify status="repair_needed">`** **MUST be followed by** **`<plan round="N+1">`**. It is *not* allowed to be followed directly by `<final_answer>` — repair\_needed implies another decomposition round. (A future "best\_effort" status may be introduced if a giving-up branch is needed; v1.1 does not allow it.)
+-11. `<verify status="repair_needed">`'s `target` MUST be a non-empty ascending comma-separated list of already-declared `<subtask>` ids.
+-12. `route.model` ∈ `available_models`; `route.skill` ∈ `available_skills`.
+-13. Total `<route>` count across all rounds ≤ 8.
+-14. Total `<plan>` round count ≤ 3 (initial + at most 2 repair rounds).
+-15. `<obs>` MAY appear only in `role: "tool"` turns.
+-16. `<plan>`, `<subtask>`, `<route>`, `<verify>`, `<final_answer>` MAY appear only in `role: "assistant"` turns.
+-
+-***
+-
+-## 4. Loss-mask regions (SFT)
+-
+-verl `MultiTurnSFTDataset` masks by message role automatically.
+-
+-- **Loss = 1** (assistant turns, all content): `<plan>`, `<subtask>`, `<route>`, `<verify>`, `<final_answer>`.
+-- **Loss = 0** (tool turns and system/user turns): `<obs>`, system prompt, user query.
+-
+-No additional masking configuration is required.
+-
+-***
+-
+-## 5. RL credit-assignment regions (GiGPO)
+-
+-| Span type       | Includes                                                     | Advantage source                                                                                                                                                              |
+-| --------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+-| **Leader span** | `<plan>` (with all `<subtask>` children); `<final_answer>`   | Episode-level group baseline (across N rollouts of the same query)                                                                                                            |
+-| **Router span** | each `<route>` (a subtask-level routing decision **anchor**) | Step-level group baseline, constructed across alternative route realizations sampled at the same query × same round × same subtask slot                                       |
+-| **Verify span** | each `<verify>`                                              | Independent advantage; if final answer is wrong but `verify.status="pass"`, the verify span receives a dedicated negative advantage that does not pollute Leader/Router spans |
+-
+-### Method-section phrasing (use verbatim)
+-
+-> Each `<route>` span serves as the **anchor** for a subtask-level routing decision. Step-level grouping is constructed across alternative route realizations sampled at the same query, same round, and same subtask slot, rather than across different subtasks within a single plan.
+-
+-### Implementation note
+-
+-At rollout time, in addition to the N episode-level rollouts, for each `<subtask>` we additionally sample K alternative `<route>` realizations (keeping the plan fixed). These K samples form the step-level group for that subtask slot. Default: N=8, K=4.
+-
+-***
+-
+-## 6. Canonical exemplars
+-
+-These exemplars are the reference samples used in the Method section figures and in the distillation prompt as in-context examples.
+-
+-### Exemplar 1 — Lazy (zero decomposition)
+-
+-```python
+-messages = [
+-    {"role": "system", "content": SYSTEM_PROMPT},
+-    {"role": "user", "content": "What is the capital of France?"},
+-    {"role": "assistant", "content": "<final_answer>Paris</final_answer>"},
+-]
+-```
+-
+-Demonstrates: full collapse to `<final_answer>` with no `<plan>` and no `<route>`.
+-
+-### Exemplar 2 — One-shot success (plan + parallel route + verify pass)
+-
+-```python
+-messages = [
+-    {"role": "system", "content": SYSTEM_PROMPT},
+-    {"role": "user", "content":
+-        "Compute the GDP per capita of the country whose capital is Lima, "
+-        "using its 2023 GDP and population."},
+-
+-    {"role": "assistant", "content":
+-        '<plan round="1">\n'
+-        '  <subtask id="1" depends_on="">Identify the country whose capital is Lima</subtask>\n'
+-        '  <subtask id="2" depends_on="1">Find that country\'s 2023 GDP</subtask>\n'
+-        '  <subtask id="3" depends_on="1">Find that country\'s 2023 population</subtask>\n'
+-        '  <subtask id="4" depends_on="2,3">Compute GDP per capita</subtask>\n'
+-        '</plan>\n'
+-        '<route round="1" subtask="1" model="claude-haiku-4-5-20251001" skill="direct_solve">Country whose capital is Lima</route>\n'
+-        '<route round="1" subtask="2" model="claude-haiku-4-5-20251001" skill="retrieval">Peru 2023 nominal GDP</route>\n'
+-        '<route round="1" subtask="3" model="claude-haiku-4-5-20251001" skill="retrieval">Peru 2023 population</route>\n'
+-        '<route round="1" subtask="4" model="gpt-5.1-codex" skill="code_exec">Compute GDP per capita: GDP / population</route>'
+-    },
+-
+-    {"role": "tool", "content":
+-        '<obs subtask="1">Peru.</obs>\n'
+-        '<obs subtask="2">Peru 2023 nominal GDP: $267.6 billion USD.</obs>\n'
+-        '<obs subtask="3">Peru 2023 population: 34.35 million.</obs>\n'
+-        '<obs subtask="4">267600000000 / 34350000 = 7790.39 USD.</obs>'
+-    },
+-
+-    {"role": "assistant", "content":
+-        '<verify round="1" status="pass">All four subtasks succeeded; values are consistent and the computation is sound.</verify>\n'
+-        '<final_answer>Approximately $7,790 USD per capita (Peru, 2023).</final_answer>'
+-    },
+-]
+-```
+-
+-Demonstrates: dependency-aware DAG, mixed `direct_solve` / `retrieval` / `code_exec`, dependency-respecting execution, single-round verify pass.
+-
+-### Exemplar 3 — Repair loop
+-
+-```python
+-messages = [
+-    {"role": "system", "content": SYSTEM_PROMPT},
+-    {"role": "user", "content": "<some query requiring two facts X and Y>"},
+-
+-    {"role": "assistant", "content":
+-        '<plan round="1">\n'
+-        '  <subtask id="1" depends_on="">Find X</subtask>\n'
+-        '  <subtask id="2" depends_on="">Find Y</subtask>\n'
+-        '</plan>\n'
+-        '<route round="1" subtask="1" model="claude-haiku-4-5-20251001" skill="retrieval">query for X</route>\n'
+-        '<route round="1" subtask="2" model="claude-haiku-4-5-20251001" skill="retrieval">query for Y</route>'
+-    },
+-
+-    {"role": "tool", "content":
+-        '<obs subtask="1">X = ...</obs>\n'
+-        '<obs subtask="2">No relevant results found.</obs>'
+-    },
+-
+-    {"role": "assistant", "content":
+-        '<verify round="1" status="repair_needed" target="2">Subtask 2 retrieval returned no relevant results; need a broader query and a stronger retriever model.</verify>\n'
+-        '<plan round="2">\n'
+-        '  <subtask id="3" depends_on="">Broader retrieval for Y with alternative phrasing</subtask>\n'
+-        '</plan>\n'
+-        '<route round="2" subtask="3" model="claude-sonnet-4-6" skill="retrieval">broader query for Y</route>'
+-    },
+-
+-    {"role": "tool", "content":
+-        '<obs subtask="3">Y = ...</obs>'
+-    },
+-
+-    {"role": "assistant", "content":
+-        '<verify round="2" status="pass">Subtask 3 successfully recovered the missing evidence; combined results are now sufficient.</verify>\n'
+-        '<final_answer>...</final_answer>'
+-    },
+-]
+-```
+-
+-Demonstrates: verify-triggered repair, tier escalation (haiku → sonnet) on retry, monotonic id sequence across rounds, ≤ 2 repair rounds.
+-
+-***
+-
+-## 7. Distillation prompt requirements
+-
+-The distillation prompt MUST enforce all of the following on the teacher model output. Samples violating any rule are discarded by the parser before being written to the SFT parquet.
+-
+-1. `depends_on` is always present, including `depends_on=""`.
+-2. `route.round` always equals the `round` of its containing `<plan>`.
+-3. `verify.status` is an attribute, never embedded in free text.
+-4. `verify status="repair_needed"` always carries a `target` attribute with ascending ids.
+-5. `verify status="repair_needed"` is always followed by another `<plan>`, never by `<final_answer>`.
+-6. No `<think>`, `<reasoning>`, or chain-of-thought in any form.
+-7. **Lazy mode coverage**: ≥ 30% of distilled samples should be lazy (`<final_answer>` directly) or single-route to ensure the policy can collapse fully.
+-8. **Repair coverage**: ≥ 30% of distilled samples should contain at least one repair round to give RL exploration prior over the repair branch.
+-9. `model` and `skill` MUST be exact strings from the closed vocabularies in `config/pools.yaml`.
+-10. `target`, `depends_on`, and any other multi-id list are written in **ascending order**.
+-
+-***
+-
+-## 8. Parser regex (reference implementation)
+-
+-```python
+-import re
+-
+-PLAN_RE    = re.compile(r'<plan round="(\d+)">(.*?)</plan>', re.DOTALL)
+-SUBTASK_RE = re.compile(r'<subtask id="(\d+)" depends_on="([^"]*)">(.*?)</subtask>', re.DOTALL)
+-ROUTE_RE   = re.compile(
+-    r'<route round="(\d+)" subtask="(\d+)" model="([^"]+)" skill="([^"]+)">(.*?)</route>',
+-    re.DOTALL,
+-)
+-OBS_RE     = re.compile(r'<obs subtask="(\d+)">(.*?)</obs>', re.DOTALL)
+-VERIFY_RE  = re.compile(
+-    r'<verify round="(\d+)" status="(pass|repair_needed)"(?: target="([^"]*)")?>(.*?)</verify>',
+-    re.DOTALL,
+-)
+-FINAL_RE   = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
+-```
+-
+-The parser uses these regexes to (a) verify all validity constraints in §3, (b) extract span boundaries for RL credit assignment per §5, and (c) compute the analysis metadata listed in §10.
+-
+-***
+-
+-## 9. Storage layout
+-
+-### SFT parquet — `data/sft/sft_warmstart.parquet`
+-
+-Columns:
+-
+-| Column               | Type        | Description                                                           |
+-| -------------------- | ----------- | --------------------------------------------------------------------- |
+-| `messages`           | list\[dict] | ChatML; this is the **only column read by** **`MultiTurnSFTDataset`** |
+-| `id`                 | str         | Unique sample id, e.g. `hotpotqa_train_5e4f3a`                        |
+-| `data_source`        | str         | HF dataset name                                                       |
+-| `domain`             | str         | One of the 10 SFT recipe domains                                      |
+-| `difficulty`         | str         | `easy` / `medium` / `hard`                                            |
+-| `n_subtasks_planned` | int         | Total `<subtask>` count                                               |
+-| `n_routes`           | int         | Total `<route>` count                                                 |
+-| `n_rounds`           | int         | Total `<plan>` rounds                                                 |
+-| `n_repair_rounds`    | int         | `n_rounds − 1`                                                        |
+-| `is_lazy`            | bool        | True iff trajectory has zero `<route>`                                |
+-| `models_used`        | list\[str]  | Distinct `model` values across all `<route>`                          |
+-| `skills_used`        | list\[str]  | Distinct `skill` values across all `<route>`                          |
+-| `ground_truth`       | str         | Verifier reference answer                                             |
+-| `distilled_by`       | str         | Teacher model id                                                      |
+-| `format_valid`       | bool        | Always True (invalid samples are not written)                         |
+-| `answer_verified`    | bool        | Whether the final answer matches gold via the source's verifier       |
+-| `input_tokens`       | int         | Teacher input token count                                             |
+-| `output_tokens`      | int         | Teacher output token count                                            |
+-
+-### RL parquet — `data/rl/rl_pool.parquet`
+-
+-Same `id` keying as the SFT parquet (one-to-one with the SFT samples). Columns mirror verl-agent's expected format (`data_source`, `prompt`, `ability`, `reward_model`, `extra_info`); see `data/rl_format.md` for details. The `prompt` column contains only system + user messages; trajectories are generated by the env at rollout time, not stored.
+-
+-***
+-
+-## 10. Lock status
+-
+-Schema **v1.1 LOCKED** as of this commit. All downstream artifacts (`config/pools.yaml`, `config/sft_recipe.yaml`, `scripts/generate_trajectories.py`, the env implementation, and the paper's Method section) MUST conform to this document. Any change requires bumping to v1.2 and updating all dependents.
+-
+-### Changelog from earlier drafts
+-
+-- v0 → v1.0: introduced `<plan>`, `<route>`, `<obs>`, `<verify>`, `<final_answer>`, `round`, explicit `depends_on`, single-shot decomposition + repair.
+-- v1.0 → v1.1: (1) `skill="none"` → `skill="direct_solve"`; (2) `verify status="repair_needed"` MUST be followed by `<plan>`, never directly by `<final_answer>`; (3) dependency-declaration constraint reworded to reference declaration order, not temporal order; (4) `model`/`skill` declared as closed vocabularies; (5) `target` and `depends_on` lists declared ascending; (6) `<think>` removed.
+-
+diff --git a/eval_pipeline/benchmarks/swebench.py b/eval_pipeline/benchmarks/swebench.py
+index 48d76ea..17b3a6c 100644
+--- a/eval_pipeline/benchmarks/swebench.py
++++ b/eval_pipeline/benchmarks/swebench.py
+@@ -1,9 +1,11 @@
+ """
+ SWE-bench Verified benchmark adapter.
+ 
+-Two modes (mirrors AOrchestra design):
+-1. One-shot: router generates patch blindly → swebench harness verifies (baseline, weak)
+-2. Interactive: router ↔ Docker multi-turn — real shell feedback each step (correct approach)
++Two modes:
++1. Interactive: router ↔ Docker multi-turn → extract patch → official swebench harness verify
++2. One-shot: router generates patch blindly → official swebench harness verify (fallback)
++
++Verification always uses the official swebench harness (never self-parsed).
+ """
+ import re
+ import os
+@@ -11,108 +13,9 @@ import json
+ import subprocess
+ import tempfile
+ import time
+-from typing import List, Tuple, Dict, Optional
++from typing import List
+ from .base import BaseBenchmark, Task, VerifyResult
+ 
+-# ── Test evaluation helpers (from AOrchestra/swebench_executor.py) ──
+-
+-START_TEST_OUTPUT = ">>>>> Start Test Output"
+-END_TEST_OUTPUT = ">>>>> End Test Output"
+-
+-REPO_TEST_CMDS = {
+-    "astropy/astropy": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-    "django/django": "./tests/runtests.py --verbosity 2 {tests}",
+-    "matplotlib/matplotlib": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-    "pallets/flask": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-    "psf/requests": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-    "pylint-dev/pylint": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-    "pytest-dev/pytest": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-    "scikit-learn/scikit-learn": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-    "sphinx-doc/sphinx": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-    "sympy/sympy": "bin/test -C --verbose {tests}",
+-    "pydata/xarray": "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider",
+-}
+-DEFAULT_TEST_CMD = "python -m pytest {tests} --no-header -rA --tb=no -p no:cacheprovider"
+-
+-
+-def _make_eval_script(repo, base_commit, test_patch, repo_dir="/testbed", env_name="testbed"):
+-    """Generate test evaluation script (from AOrchestra)."""
+-    HEREDOC = "EOF_114329324912"
+-    test_files = re.findall(r"diff --git a/.* b/(.*)", test_patch) if test_patch else []
+-    directives = [f for f in test_files if not any(f.endswith(e) for e in
+-                  [".json",".png",".jpg",".txt",".md",".rst",".yaml",".yml",".toml",".cfg",".lock"])]
+-    if repo == "django/django":
+-        directives = [d[len("tests/"):].replace("/",".").rstrip(".py") if d.startswith("tests/") else d for d in directives]
+-    test_cmd = REPO_TEST_CMDS.get(repo, DEFAULT_TEST_CMD).format(tests=" ".join(directives))
+-    reset = f"git checkout {base_commit} -- {' '.join(test_files)}" if test_files else ":"
+-    apply_patch = f"git apply -v - <<'{HEREDOC}'\n{test_patch}\n{HEREDOC}" if test_patch else ":"
+-    return "\n".join([
+-        "#!/bin/bash", "set -uxo pipefail", "",
+-        "source /opt/miniconda3/bin/activate", f"conda activate {env_name}",
+-        f"cd {repo_dir}", f"git config --global --add safe.directory {repo_dir}",
+-        "git status", f"git -c core.fileMode=false diff {base_commit}", "",
+-        "source /opt/miniconda3/bin/activate", f"conda activate {env_name}",
+-        reset, "", apply_patch, "",
+-        f": '{START_TEST_OUTPUT}'", test_cmd, f": '{END_TEST_OUTPUT}'", "",
+-        reset,
+-    ]) + "\n"
+-
+-
+-def _parse_test_results(test_output, repo, fail_to_pass, pass_to_pass):
+-    """Parse test output → reward (from AOrchestra)."""
+-    start = test_output.find(START_TEST_OUTPUT)
+-    end = test_output.find(END_TEST_OUTPUT)
+-    log = test_output[start:end] if start != -1 and end != -1 else test_output
+-
+-    # Parse pytest/django output
+-    status = {}
+-    if repo == "django/django":
+-        for m in re.finditer(r"^(test_\w+)\s+\(([^)]+)\)\s+\.\.\.\s+(ok|FAIL|ERROR)", log, re.M):
+-            status[f"{m.group(1)} ({m.group(2)})"] = "PASSED" if m.group(3) == "ok" else "FAILED"
+-    else:
+-        for m in re.finditer(r"^(.*?)\s+(PASSED|FAILED|ERROR)", log, re.M):
+-            status[m.group(1).strip()] = m.group(2)
+-
+-    def _check(test_name, want_pass=True):
+-        for k, s in status.items():
+-            if test_name in k or k in test_name:
+-                return (s == "PASSED") == want_pass
+-            method = test_name.split("::")[-1] if "::" in test_name else test_name.split(".")[-1]
+-            if method in k:
+-                return (s == "PASSED") == want_pass
+-        return want_pass  # optimistic default
+-
+-    f2p_ok = all(_check(t, True) for t in (fail_to_pass or []))
+-    p2p_ok = all(_check(t, True) for t in (pass_to_pass or []))
+-    return 1.0 if (f2p_ok and p2p_ok) else 0.0
+-
+-
+-# ── Docker helpers ──
+-
+-def _docker_exec(container, cmd, timeout=120):
+-    """Execute command in Docker container, return (stdout, exit_code)."""
+-    try:
+-        p = subprocess.run(
+-            ["docker", "exec", "-i", container, "bash"],
+-            input=cmd.encode(), capture_output=True, timeout=timeout,
+-        )
+-        out = p.stdout.decode("utf-8", errors="replace")
+-        if p.stderr:
+-            out += "\nSTDERR: " + p.stderr.decode("utf-8", errors="replace")[-500:]
+-        return out[-3000:], p.returncode
+-    except subprocess.TimeoutExpired:
+-        return "[timeout]", -1
+-    except Exception as e:
+-        return f"[error: {e}]", -1
+-
+-
+-def _get_swebench_image(instance_id):
+-    """Map instance_id → Docker image name (swebench convention)."""
+-    parts = instance_id.split("__")
+-    owner = parts[0]
+-    repo_issue = parts[1] if len(parts) > 1 else instance_id
+-    return f"swebench/sweb.eval.x86_64.{owner}_1776_{repo_issue}"
+-
+ 
+ # ── SWE-bench system prompt for interactive mode ──
+ 
+@@ -207,41 +110,49 @@ class SWEBench(BaseBenchmark):
+ 
+     def interactive_verify(self, task: Task, router, logs_dir=None) -> VerifyResult:
+         """
+-        Multi-turn interactive evaluation (following AOrchestra):
+-        1. Start swebench Docker container with repo at base_commit
++        Multi-turn interactive evaluation (AOrchestra style):
++        1. Start swebench Docker container via AOrchestra executor
+         2. Router sees issue → DISCUSSION + COMMAND
+-        3. COMMAND executes in Docker → real output back to router
++        3. COMMAND executes in container → real output back to router
+         4. Repeat until 'submit' or max_steps
+-        5. Run official test eval script inside container
++        5. Run tests in SAME container (AOrchestra executor.run_tests)
+         """
+-        from ..config import COST_PER_M, EVAL_MAX_TOKENS, SUB_AGENT_TEMP, resolve_model
++        import asyncio
++        loop = asyncio.new_event_loop()
++        try:
++            return loop.run_until_complete(
++                self._async_interactive_verify(task, router, logs_dir)
++            )
++        finally:
++            loop.close()
++
++    async def _async_interactive_verify(self, task, router, logs_dir=None):
++        from ..executors.swebench_executor import SWEBenchExecutor
++        from ..executors.swebench_data_loader import SWEBenchInstance
++        from pathlib import Path
+ 
+         ctx = task.context
+-        image = _get_swebench_image(task.task_id)
+-        container = f"swebench_{task.task_id.replace('/', '_')}_{int(time.time())}"
+-        task_logs = os.path.join(logs_dir or "/tmp", task.task_id.replace("/", "_"))
+-        os.makedirs(task_logs, exist_ok=True)
++        task_logs = Path(logs_dir or "/tmp") / task.task_id.replace("/", "_")
++        task_logs.mkdir(parents=True, exist_ok=True)
+         log = ""
+-        total_cost = 0.0
+ 
+-        # Regex to parse agent output
++        # Build SWEBenchInstance from task context
++        instance = SWEBenchInstance.from_dict(task.raw)
++
++        # Create AOrchestra executor
++        executor = SWEBenchExecutor(
++            instance=instance,
++            logs_dir=task_logs,
++            timeout=self.docker_timeout,
++        )
++
+         CMD_RE = re.compile(r"COMMAND\s*\n(.+?)(?:\n\n|\Z)", re.DOTALL)
+ 
+         try:
+-            # ── Start container ──
+-            subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=10)
+-            rc = subprocess.run([
+-                "docker", "run", "-d", "--name", container,
+-                image, "tail", "-f", "/dev/null",
+-            ], capture_output=True, text=True, timeout=120)
+-            if rc.returncode != 0:
+-                return VerifyResult(task.task_id, 0.0, error=f"docker run: {rc.stderr[:300]}")
+-
+-            # Checkout base commit
+-            _docker_exec(container, f"cd /testbed && git checkout -f {ctx['base_commit']}", timeout=60)
+-            _docker_exec(container, "cd /testbed && git reset --hard HEAD && git clean -fd", timeout=30)
+-
+-            # ── Build initial prompt ──
++            # Start container (AOrchestra handles image pull + checkout)
++            await executor.start_container()
++
++            # Build prompt
+             instruction = (
+                 f"## Repository: {ctx['repo']}\n\n"
+                 f"## Issue\n{ctx['problem_statement'][:6000]}\n"
+@@ -254,9 +165,8 @@ class SWEBench(BaseBenchmark):
+                 {"role": "user", "content": instruction},
+             ]
+ 
+-            # ── Multi-turn loop ──
++            # Multi-turn loop
+             for step in range(self.max_steps):
+-                # Get router decision
+                 try:
+                     resp = router.local.chat.completions.create(
+                         model=router.model_name,
+@@ -272,80 +182,40 @@ class SWEBench(BaseBenchmark):
+                 messages.append({"role": "assistant", "content": assistant_text})
+                 log += f"\n[STEP {step+1}] ASSISTANT:\n{assistant_text[:500]}\n"
+ 
+-                # Parse COMMAND
+                 cmd_match = CMD_RE.search(assistant_text)
+                 if not cmd_match:
+-                    # No command found, maybe router is done or confused
+                     log += "[NO COMMAND FOUND]\n"
+                     break
+ 
+-                command = cmd_match.group(1).strip().split("\n")[0].strip()  # first line only
++                command = cmd_match.group(1).strip().split("\n")[0].strip()
+ 
+-                # ── Submit: run tests ──
+                 if command.lower() == "submit":
+                     log += "[SUBMIT]\n"
+                     break
+ 
+-                # ── Execute command in Docker ──
+-                # Wrap with cd /testbed for convenience
++                # Execute in same container via AOrchestra executor
+                 exec_cmd = f"cd /testbed && {command}"
+-                output, exit_code = _docker_exec(container, exec_cmd, timeout=120)
++                output, exit_code = await executor.execute_command(exec_cmd, timeout=120)
++                output = output[-2000:]
+ 
+                 obs = f"[Step {step+1}/{self.max_steps}] exit_code={exit_code}\n{output}"
+                 log += f"[STEP {step+1}] CMD: {command}\n[OUTPUT] {output[:500]}\n"
+-
+-                # Also check if router wants to call API sub-agent via <search>
+-                search_m = re.search(r"<search>(.*?)(?:</search>|$)", assistant_text, re.DOTALL)
+-                if search_m:
+-                    raw = search_m.group(1).strip()
+-                    parts = raw.split(":", 1)
+-                    from ..routers.local_router import _resolve, DEFAULT_MODEL
+-                    mid = _resolve(parts[0]) if len(parts) > 1 else DEFAULT_MODEL
+-                    query = parts[1].strip() if len(parts) > 1 else raw
+-                    try:
+-                        sr = router.api.chat.completions.create(
+-                            model=mid,
+-                            messages=[{"role": "user", "content": f"SWE-bench issue in {ctx['repo']}:\n{ctx['problem_statement'][:3000]}\n\nQuestion: {query}"}],
+-                            temperature=SUB_AGENT_TEMP, max_tokens=EVAL_MAX_TOKENS,
+-                        )
+-                        api_txt = sr.choices[0].message.content or ""
+-                        toks = getattr(sr.usage, "completion_tokens", 0) or 0
+-                        total_cost += COST_PER_M.get(mid, 10.0) * max(toks, 1) / 1e6
+-                        obs += f"\n[API {mid}]: {api_txt[:1500]}"
+-                    except Exception as e:
+-                        obs += f"\n[API ERROR: {e}]"
+-
+                 messages.append({"role": "user", "content": obs})
+ 
+-            # ── Run test evaluation ──
+-            eval_script = _make_eval_script(
+-                repo=ctx["repo"],
+-                base_commit=ctx["base_commit"],
+-                test_patch=ctx.get("test_patch", ""),
+-            )
+-            # Write and execute eval script
+-            _docker_exec(container, f"cat > /eval.sh << 'EOF_EVAL'\n{eval_script}\nEOF_EVAL", timeout=10)
+-            _docker_exec(container, "chmod +x /eval.sh", timeout=5)
+-            test_output, _ = _docker_exec(container, "/bin/bash /eval.sh", timeout=self.docker_timeout)
+-            log += f"\n[TEST OUTPUT]\n{test_output[-2000:]}\n"
+-
+-            # Save logs
+-            with open(os.path.join(task_logs, "trace.log"), "w") as f:
++            # ── Run tests in SAME container (AOrchestra's run_tests) ──
++            reward, test_results = await executor.run_tests()
++            log += f"\n[TEST] reward={reward} summary={test_results.get('summary',{})}\n"
++
++            # Save trace
++            with (task_logs / "trace.log").open("w") as f:
+                 f.write(log)
+-            with open(os.path.join(task_logs, "test_output.txt"), "w") as f:
+-                f.write(test_output)
+ 
+-            # Parse reward
+-            reward = _parse_test_results(
+-                test_output, ctx["repo"],
+-                ctx.get("FAIL_TO_PASS", []), ctx.get("PASS_TO_PASS", []),
+-            )
+             return VerifyResult(task.task_id, reward, log=log[-3000:])
+ 
+         except Exception as e:
+             return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[-3000:])
+         finally:
+-            subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=30)
++            await executor.cleanup()
+ 
+     # ─── One-shot mode (legacy, for non-interactive routers) ───
+ 
+diff --git a/eval_pipeline/benchmarks/terminalbench.py b/eval_pipeline/benchmarks/terminalbench.py
+index f075e62..9640c63 100644
+--- a/eval_pipeline/benchmarks/terminalbench.py
++++ b/eval_pipeline/benchmarks/terminalbench.py
+@@ -68,6 +68,43 @@ RULES:
+ - If a command times out, try a simpler alternative.
+ """
+ 
++INTERACTIVE_SUBAGENT_PROMPT = """\
++You are an orchestrator completing a terminal/systems task inside a Docker container.
++You can either execute commands directly OR delegate to a specialized LLM for help.
++
++Each turn, respond with ONE of these formats:
++
++Option A — Execute a command yourself:
++DISCUSSION
++<reasoning>
++COMMAND
++<single shell command>
++
++Option B — Ask a specialized LLM for help:
++DISCUSSION
++<reasoning about which model to use and why>
++COMMAND
++<search> ModelName:Your question or request </search>
++
++Available models (input/output $/1M tokens):
++Gemini-2.5-Flash-Lite($0.10/$0.40) Gemini-2.5-Flash($0.30/$2.50) Kimi-K2.5($0.35/$2.50)
++Gemini-3-Flash-Preview($0.50/$3) Claude-Haiku-4.5($1/$5) GPT-5.3-Codex($1.75/$14)
++GPT-5.4($2.50/$15) Claude-Sonnet-4.6($3/$15) Claude-Opus-4.6($5/$25)
++
++The LLM response will appear as [API ...]: <response>. You can then use that to write commands.
++
++When done:
++DISCUSSION
++<summary>
++COMMAND
++finish
++
++RULES:
++- ONE action per turn (either a shell command or a <search> call).
++- Use cheap models for simple questions, expensive ones for complex code/reasoning.
++- You are root inside the container. Use DEBIAN_FRONTEND=noninteractive for apt.
++"""
++
+ 
+ # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ # TerminalBench benchmark
+@@ -385,3 +422,170 @@ class TerminalBench(BaseBenchmark):
+             ]):
+                 lines.append(s)
+         return "\n".join(lines) if lines else text
++
++    # ─── Pipeline mode: planner → router → sub-agent → Docker ──
++
++    def pipeline_verify(self, task: Task, args, pools, logs_dir=None) -> VerifyResult:
++        """
++        Full pipeline evaluation (our method):
++        1. Planner (local) decomposes task into subtasks
++        2. Router (local) selects API model + skill per subtask
++        3. Sub-agent (API) generates solution/commands
++        4. Extract commands → execute in Docker
++        5. Run test.sh → reward
++        """
++        loop = asyncio.new_event_loop()
++        try:
++            return loop.run_until_complete(
++                self._async_pipeline_verify(task, args, pools, logs_dir)
++            )
++        finally:
++            loop.close()
++
++    async def _async_pipeline_verify(self, task, args, pools, logs_dir=None):
++        """
++        Multi-round pipeline: planner decomposes → router selects model →
++        sub-agent generates commands → Docker executes → output feeds back to planner.
++        Repeats until planner finishes or max_rounds.
++        """
++        import sys
++        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
++        from scripts.data.router import aroute_subtask
++        from scripts.data.planner import arun_planner
++        from openai import AsyncOpenAI
++        from ..executors import DockerExecutor
++
++        config = task.raw.get("config", {})
++        task_dir = Path(task.raw.get("task_dir", ""))
++        if not config:
++            config, task_dir_str = self._get_task_config(task.task_id)
++            if not config:
++                return VerifyResult(task.task_id, 0.0, error=f"No config for {task.task_id}")
++            task_dir = Path(task_dir_str)
++
++        task_logs = Path(logs_dir or "/tmp") / task.task_id
++        verifier_logs = task_logs / "verifier"
++        agent_logs = task_logs / "agent"
++        verifier_logs.mkdir(parents=True, exist_ok=True)
++        agent_logs.mkdir(parents=True, exist_ok=True)
++
++        log = ""
++        models_used = []
++        skills_used = []
++
++        # Start Docker container first
++        executor = DockerExecutor(
++            task_id=task.task_id,
++            task_dir=task_dir,
++            task_config=config,
++            verifier_logs_dir=verifier_logs,
++            agent_logs_dir=agent_logs,
++            docker_manager=self._get_docker_manager(),
++            docker_timeout=self.docker_timeout,
++        )
++
++        sub_client = AsyncOpenAI(
++            base_url=args.api_base, api_key=args.api_key, timeout=60,
++        )
++        _extra = {"enable_thinking": False}
++
++        try:
++            await executor.start_container()
++            instruction = task.context.get("task_instruction", task.question)
++            env_feedback = ""  # accumulate Docker output for planner context
++            max_rounds = 10
++
++            # Define execute_subtask: router picks model → sub-agent responds → extract commands → Docker exec
++            async def execute_subtask(subtask_instruction: str, task_id: str) -> str:
++                nonlocal env_feedback
++                # Same as arun_agent: router selects model + skill
++                selected_model, selected_skill = await aroute_subtask(
++                    instruction=subtask_instruction,
++                    model=args.local_model or "Qwen/Qwen2.5-7B-Instruct",
++                    api_base=args.local_base, api_key="none",
++                    pools=pools, temperature=0.3,
++                )
++                models_used.append(selected_model)
++                skills_used.append(selected_skill)
++
++                # Same as arun_agent: sub-agent receives instruction directly
++                try:
++                    resp = await sub_client.chat.completions.create(
++                        model=selected_model,
++                        messages=[{"role": "user", "content": subtask_instruction}],
++                        temperature=0.1, max_tokens=1024,
++                        extra_body=_extra,
++                    )
++                    sub_response = resp.choices[0].message.content.strip()
++                except Exception as e:
++                    sub_response = f"Error: {e}"
++
++                # Extra step vs arun_agent: extract commands and execute in Docker
++                commands = self._extract_commands(sub_response)
++                if commands.strip():
++                    output, exit_code = await executor.execute_command(commands, timeout=300)
++                    output = output[-2000:]
++                    result = f"[routed to {selected_model} / {selected_skill}]\n{sub_response}\n[Docker exit={exit_code}]\n{output}"
++                else:
++                    result = f"[routed to {selected_model} / {selected_skill}]\n{sub_response}"
++
++                env_feedback += f"\n{result[-1000:]}"
++                return result
++
++            # Terminal-Bench specific planner prompt
++            tb_planner_prompt = (
++                "You are an orchestrator completing a terminal/systems task inside a Docker container.\n"
++                "Your sub-agents will execute shell commands in the container.\n\n"
++                "Tools:\n"
++                "- plan_subtask(instruction, task_id): delegate to a specialist who will run commands in Docker.\n"
++                "  The instruction MUST describe what shell commands to run, what packages to install,\n"
++                "  what files to create/edit, etc. Be specific and actionable.\n"
++                "- finish(answer): call when all work is done. The answer field can be 'done' or a brief summary.\n\n"
++                "Rules:\n"
++                "1. Break the task into concrete subtasks: install dependencies, write code, configure services, test.\n"
++                "2. Each subtask instruction must be self-contained with exact commands or code.\n"
++                "3. Include bash commands in the instruction, e.g. 'Run: apt-get install -y nginx && nginx -v'\n"
++                "4. After sub-agents complete, call finish('done').\n"
++                "5. You are root in the container. Use DEBIAN_FRONTEND=noninteractive for apt.\n"
++            )
++
++            # Run planner with Docker-integrated subtask execution
++            planner_result = await arun_planner(
++                question=instruction,
++                model=args.local_model or "Qwen/Qwen2.5-7B-Instruct",
++                api_base=args.local_base, api_key="none",
++                execute_subtask_fn=execute_subtask,
++                temperature=0.7,
++                system_prompt=tb_planner_prompt,
++            )
++
++            log += f"[PIPELINE] complete={planner_result.get('complete')} models={models_used} skills={skills_used}\n"
++            log += f"[ANSWER] {str(planner_result.get('answer',''))[:300]}\n"
++
++            # Save trajectory
++            with (task_logs / "pipeline_result.json").open("w") as f:
++                import json
++                json.dump({
++                    "task_id": task.task_id,
++                    "result": planner_result,
++                    "models_used": models_used,
++                    "skills_used": skills_used,
++                    "log": log,
++                }, f, indent=2, default=str)
++
++            # Run tests
++            reward = await executor.run_tests()
++            log += f"[REWARD] {reward}\n"
++
++            with (task_logs / "trace.log").open("w") as f:
++                f.write(log)
++
++            return VerifyResult(task.task_id, reward, log=log[-3000:])
++
++        except Exception as e:
++            return VerifyResult(task.task_id, 0.0, error=str(e)[:300], log=log[-3000:])
++        finally:
++            try:
++                await executor.cleanup()
++            except Exception:
++                pass
+diff --git a/eval_pipeline/executors/__init__.py b/eval_pipeline/executors/__init__.py
+index a3b6525..654e5c0 100644
+--- a/eval_pipeline/executors/__init__.py
++++ b/eval_pipeline/executors/__init__.py
+@@ -1,3 +1,5 @@
+ from .docker_executor import DockerExecutor
+ from .docker_manager import DockerComposeManager, DockerComposeEnvVars
+ from .base_executor import BaseExecutor
++from .swebench_executor import SWEBenchExecutor
++from .swebench_data_loader import SWEBenchInstance
+diff --git a/eval_pipeline/routers/local_router.py b/eval_pipeline/routers/local_router.py
+index 24af62c..3b41b1b 100644
+--- a/eval_pipeline/routers/local_router.py
++++ b/eval_pipeline/routers/local_router.py
+@@ -13,38 +13,39 @@ Answer the given question. \
+ Every time you receive new information, reason inside <think> ... </think>. \
+ Then call a specialized LLM via <search> LLM-Name:Your-Query </search>. \
+ 
+-STRICT FORMAT: Replace LLM-Name with EXACT name from [Claude-Haiku-4.5, Gemini-2.5-Flash, Kimi-K2.5, Claude-Sonnet-4.6, Gemini-3.1-Pro, GPT-5.3-Codex, Qwen3.6-Plus, Claude-Opus-4.6, GPT-5.4]. \
++STRICT FORMAT: Replace LLM-Name with EXACT name from [Gemini-2.5-Flash-Lite, Gemini-2.5-Flash, Kimi-K2.5, Gemini-3-Flash-Preview, Claude-Haiku-4.5, GPT-5.3-Codex, GPT-5.4, Claude-Sonnet-4.6, Claude-Opus-4.6]. \
+ NEVER use literal "LLM-Name". Before each call, reason in <think> about which model and why. \
+ Response appears in <information>...</information>. When done: <answer>...</answer>. \
+ 
+-Models: \
+-Claude-Haiku-4.5($1.25) Gemini-2.5-Flash($1.50) Kimi-K2.5($2) Claude-Sonnet-4.6($15) \
+-Gemini-3.1-Pro($10) GPT-5.3-Codex($20) Qwen3.6-Plus($8) Claude-Opus-4.6($75) GPT-5.4($60) \
++Models (input/output $/1M tokens): \
++Gemini-2.5-Flash-Lite($0.10/$0.40) Gemini-2.5-Flash($0.30/$2.50) Kimi-K2.5($0.35/$2.50) \
++Gemini-3-Flash-Preview($0.50/$3) Claude-Haiku-4.5($1/$5) GPT-5.3-Codex($1.75/$14) \
++GPT-5.4($2.50/$15) Claude-Sonnet-4.6($3/$15) Claude-Opus-4.6($5/$25) \
+ Question: {question}
+ """
+ 
+ # Display name → API model ID
+ _NAME_MAP = {
+-    "claude-haiku-4.5": "gemini-2.5-flash",
++    "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
+     "gemini-2.5-flash": "gemini-2.5-flash",
+     "kimi-k2.5": "kimi-k2.5",
+-    "claude-sonnet-4.6": "claude-sonnet-4-6",
+-    "gemini-3.1-pro": "gemini-3.1-pro-preview",
++    "gemini-3-flash-preview": "gemini-3-flash-preview",
++    "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+     "gpt-5.3-codex": "gpt-5.3-codex",
+-    "qwen3.6-plus": "qwen3.6-plus",
+-    "claude-opus-4.6": "claude-opus-4-6",
+     "gpt-5.4": "gpt-5.4",
++    "claude-sonnet-4.6": "claude-sonnet-4-6",
++    "claude-opus-4.6": "claude-opus-4-6",
+ }
+ 
+ _FUZZY = [
+     ("codex", "gpt-5.3-codex"), ("5.4", "gpt-5.4"), ("opus", "claude-opus-4-6"),
+     ("sonnet", "claude-sonnet-4-6"), ("haiku", "claude-haiku-4-5-20251001"),
+-    ("pro", "gemini-3.1-pro-preview"), ("flash", "gemini-2.5-flash"),
+-    ("qwen", "qwen3.6-plus"), ("kimi", "kimi-k2.5"),
++    ("flash-lite", "gemini-2.5-flash-lite"), ("flash-preview", "gemini-3-flash-preview"),
++    ("flash", "gemini-2.5-flash"), ("kimi", "kimi-k2.5"),
+     ("gpt", "gpt-5.4"), ("claude", "claude-sonnet-4-6"), ("gemini", "gemini-2.5-flash"),
+ ]
+ 
+-DEFAULT_MODEL = "gpt-5.3-codex"
++DEFAULT_MODEL = "gemini-3-flash-preview"
+ 
+ 
+ def _resolve(raw: str) -> str:
+diff --git a/eval_pipeline/run.py b/eval_pipeline/run.py
+index fd11156..822464b 100644
+--- a/eval_pipeline/run.py
++++ b/eval_pipeline/run.py
+@@ -1,4 +1,5 @@
+ import json
++import os
+ import queue
+ import argparse
+ import threading
+@@ -105,12 +106,18 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
+                       and hasattr(bench, 'interactive_verify')
+                       and args.interactive)
+ 
+-    if is_interactive:
++    # Pipeline mode: planner → router → sub-agent → Docker (our method)
++    is_pipeline = (hasattr(bench, 'pipeline_verify') and getattr(args, 'pipeline', False))
++
++    if is_pipeline:
++        _run_pipeline_eval(bench, tasks, need_verify,
++                           predictions, verification, pred_file, verify_file,
++                           logs_dir, args)
++    elif is_interactive:
+         _run_interactive(router, bench, tasks, need_verify,
+                          predictions, verification, pred_file, verify_file,
+                          logs_dir, args)
+     elif bench.name == "SWE-bench_Verified" and not args.interactive:
+-        # SWE-bench one-shot fallback (no env feedback, weak baseline)
+         _run_sequential(router, bench, tasks, need_gen, need_verify,
+                         predictions, verification, pred_file, verify_file,
+                         logs_dir, args)
+@@ -130,10 +137,19 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
+         for m in p.get("routed_models", []):
+             model_usage[m] = model_usage.get(m, 0) + 1
+ 
++    # Compute pass@k from stored per-attempt rewards
++    pass_at = {}
++    for k in [1, 3]:
++        count = 0
++        for v in verification.values():
++            attempts = v.get("pass_at_k", [v.get("reward", 0)])
++            count += int(any(r > 0 for r in attempts[:k]))
++        pass_at[k] = round(count / max(verified, 1), 4)
++
+     summary = {
+         "router": router.name, "benchmark": bench.name,
+         "total": total, "verified": verified, "passed": passed,
+-        "pass_rate": round(passed / max(verified, 1), 4),
++        "pass_at_1": pass_at.get(1, 0), "pass_at_3": pass_at.get(3, 0),
+         "passed_ids": [tid for tid, v in verification.items() if v.get("reward", 0) > 0],
+         "total_cost_usd": round(total_cost, 4),
+         "avg_cost": round(total_cost / max(total, 1), 6),
+@@ -145,9 +161,8 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
+ 
+     print(f"\n{'='*60}")
+     print(f"RESULTS — {router.name} on {bench.name}")
+-    print(f"  Pass rate: {passed}/{verified} ({passed/max(verified,1)*100:.1f}%)")
++    print(f"  Pass@1: {pass_at.get(1,0)*100:.1f}%  Pass@3: {pass_at.get(3,0)*100:.1f}%  ({passed}/{verified})")
+     print(f"  Cost: ${total_cost:.4f} (${total_cost/max(total,1):.6f}/task)")
+-    print(f"  Routing: avg {summary['avg_routes']} routes, models={model_usage}")
+     print(f"  Output: {out}")
+     print(f"{'='*60}")
+     return summary
+@@ -156,26 +171,79 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
+ def _run_interactive(router, bench, tasks, need_verify,
+                      predictions, verification, pred_file, verify_file,
+                      logs_dir, args):
+-    """Interactive mode: router ↔ Docker multi-turn for each task."""
++    """Interactive mode: router ↔ Docker multi-turn for each task.
++    Supports pass@k: run up to k attempts, pass if any succeeds."""
++    pass_k = getattr(args, 'pass_k', 1)
+     to_run = [t for t in tasks if t.task_id not in verification]
+     if not to_run:
+         print("Interactive: all tasks already verified")
+         return
+ 
+-    print(f"Interactive mode: {len(to_run)} tasks (workers={args.verify_workers})")
++    print(f"Interactive mode: {len(to_run)} tasks, pass@{pass_k} (workers={args.verify_workers})")
++
++    def _run_one_task(task):
++        """Run up to pass_k attempts for a single task."""
++        rewards = []
++        for attempt in range(pass_k):
++            attempt_logs = os.path.join(logs_dir, f"attempt_{attempt}") if pass_k > 1 else logs_dir
++            vr = bench.interactive_verify(task, router, attempt_logs)
++            rewards.append(vr.reward)
++            if vr.reward > 0:
++                break  # early stop on first success
++        best_reward = max(rewards)
++        return task, best_reward, rewards, vr
+ 
+     lock = threading.Lock()
+     with open(verify_file, "a") as vout, open(pred_file, "a") as pout:
+         with ThreadPoolExecutor(max_workers=args.verify_workers) as ex:
+-            futs = {ex.submit(bench.interactive_verify, t, router, logs_dir): t
+-                    for t in to_run}
++            futs = {ex.submit(_run_one_task, t): t for t in to_run}
+             for fut in tqdm(as_completed(futs), total=len(to_run), desc="Interactive"):
++                task, best_reward, rewards, last_vr = fut.result()
++                d = {"task_id": task.task_id, "reward": best_reward,
++                     "pass_at_k": rewards,
++                     "error": last_vr.error, "log": last_vr.log[:500]}
++                pred_entry = {"task_id": task.task_id, "answer": "(interactive)",
++                              "route_count": 0, "routed_models": [], "cost": 0}
++                with lock:
++                    verification[task.task_id] = d
++                    vout.write(json.dumps(d) + "\n")
++                    vout.flush()
++                    if task.task_id not in predictions:
++                        predictions[task.task_id] = pred_entry
++                        pout.write(json.dumps(pred_entry) + "\n")
++                        pout.flush()
++                status = "PASS" if vr.reward > 0 else "FAIL"
++                err = f" ({vr.error})" if vr.error else ""
++                tqdm.write(f"  {vr.task_id}: {status}{err}")
++
++
++def _run_pipeline_eval(bench, tasks, need_verify,
++                       predictions, verification, pred_file, verify_file,
++                       logs_dir, args):
++    """Pipeline mode: planner → router → sub-agent → Docker verify."""
++    import sys
++    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
++    from configs import load_pools
++
++    pools = load_pools()
++    to_run = [t for t in tasks if t.task_id not in verification]
++    if not to_run:
++        print("Pipeline: all tasks already verified")
++        return
++
++    print(f"Pipeline mode: {len(to_run)} tasks (workers={args.verify_workers})")
++
++    lock = threading.Lock()
++    with open(verify_file, "a") as vout, open(pred_file, "a") as pout:
++        with ThreadPoolExecutor(max_workers=args.verify_workers) as ex:
++            futs = {ex.submit(bench.pipeline_verify, t, args, pools, logs_dir): t
++                    for t in to_run}
++            for fut in tqdm(as_completed(futs), total=len(to_run), desc="Pipeline"):
+                 task = futs[fut]
+                 vr = fut.result()
+                 d = {"task_id": vr.task_id, "reward": vr.reward,
+                      "error": vr.error, "log": vr.log[:500]}
+-                # Also save a prediction entry for consistency
+-                pred_entry = {"task_id": vr.task_id, "answer": "(interactive)",
++                pred_entry = {"task_id": vr.task_id, "answer": "(pipeline)",
+                               "route_count": 0, "routed_models": [], "cost": 0}
+                 with lock:
+                     verification[vr.task_id] = d
+@@ -343,7 +411,10 @@ def main():
+     parser.add_argument("--skip_gen", action="store_true")
+     parser.add_argument("--skip_verify", action="store_true")
+     parser.add_argument("--interactive", action="store_true")
++    parser.add_argument("--pipeline", action="store_true", help="Pipeline mode: planner→router→sub-agent→Docker")
++    parser.add_argument("--pass-k", type=int, default=1, help="pass@k: run up to k attempts per task")
+     args = parser.parse_args()
++    args.pass_k = args.pass_k  # ensure accessible
+ 
+     if not args.output_dir:
+         args.output_dir = f"/data/xieht/eval_results/{args.router}_{args.bench}"
+diff --git a/scripts/data/_rerun_v3.py b/scripts/data/_rerun_v3.py
+deleted file mode 100644
+index f9e9b51..0000000
+--- a/scripts/data/_rerun_v3.py
++++ /dev/null
+@@ -1,108 +0,0 @@
+-"""Re-run all 50 samples with updated prompts and model descriptions."""
+-import sys, os, json, asyncio, time, logging
+-sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../..")))
+-
+-# Clear config cache so new pools.yaml is loaded
+-import configs
+-configs._CACHE_BY_PATH.clear()
+-
+-from configs import load_pools
+-from scripts.data.agent import arun_agent
+-from scripts.data.verifiers import verify
+-
+-logging.basicConfig(level=logging.WARNING)
+-
+-PLANNER_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+-PLANNER_API_BASE = "http://localhost:8234/v1"
+-ROUTER_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+-ROUTER_API_BASE = "http://localhost:8234/v1"
+-SUB_MODEL_API_BASE = "https://open.xiaojingai.com/v1/"
+-SUB_MODEL_API_KEY = "sk-Koqmqsvz6RO0ptLNuXRsZRXnzSPdZzkrqr6FL4M5HcbvMS4Q"
+-
+-TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../data/trajectories")
+-IN_PATH = os.path.join(TRAJ_DIR, "infra_test_50_clean.jsonl")
+-OUT_PATH = os.path.join(TRAJ_DIR, "infra_test_50_v4.jsonl")
+-POOLS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../configs/pools.yaml")
+-CONCURRENCY = 16
+-
+-
+-async def run_one(s, pools, sem, idx, total):
+-    async with sem:
+-        t0 = time.time()
+-        try:
+-            result = await arun_agent(
+-                question=s["question"],
+-                planner_model=PLANNER_MODEL, planner_api_base=PLANNER_API_BASE, planner_api_key="none",
+-                router_model=ROUTER_MODEL, router_api_base=ROUTER_API_BASE, router_api_key="none",
+-                sub_model_api_base=SUB_MODEL_API_BASE, sub_model_api_key=SUB_MODEL_API_KEY,
+-                pools=pools,
+-            )
+-        except Exception as e:
+-            result = {"answer": None, "complete": False, "n_delegates": 0,
+-                      "models_used": [], "skills_used": [], "routing_decisions": [],
+-                      "subtasks": [], "messages": [], "error": str(e)}
+-
+-        answer = result.get("answer")
+-        correct = verify(answer, s["gold_answer"], s["source"]) if answer is not None else False
+-        dt = time.time() - t0
+-        models = result.get("models_used", [])
+-
+-        status = "OK" if correct else ("WRONG" if result.get("complete") else "INCOMPLETE")
+-        print("[%d/%d] tid=%d %s ans=%s gold=%s model=%s (%.1fs)" % (
+-            idx + 1, total, s["task_id"], status,
+-            str(answer)[:25], str(s["gold_answer"])[:25],
+-            models[0] if models else "none", dt))
+-
+-        return {
+-            "task_id": s["task_id"], "source": s["source"], "domain": s["domain"],
+-            "question": s["question"], "gold_answer": s["gold_answer"],
+-            "answer": answer, "correct": correct, "complete": result.get("complete", False),
+-            "n_delegates": result.get("n_delegates", 0),
+-            "models_used": result.get("models_used", []),
+-            "skills_used": result.get("skills_used", []),
+-            "routing_decisions": result.get("routing_decisions", []),
+-            "subtasks": result.get("subtasks", []),
+-            "messages": result.get("messages", []),
+-        }
+-
+-
+-async def main():
+-    pools = load_pools(POOLS_PATH)
+-
+-    with open(IN_PATH) as f:
+-        samples = [json.loads(l) for l in f]
+-
+-    print("Re-running %d samples (v3: updated prompts + model descriptions)\n" % len(samples))
+-    sem = asyncio.Semaphore(CONCURRENCY)
+-    t0 = time.time()
+-
+-    tasks = [run_one(s, pools, sem, i, len(samples)) for i, s in enumerate(samples)]
+-    results = await asyncio.gather(*tasks)
+-
+-    with open(OUT_PATH, "w") as f:
+-        for r in results:
+-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+-
+-    total = len(results)
+-    correct = sum(1 for r in results if r["correct"])
+-    complete = sum(1 for r in results if r["complete"])
+-
+-    # Routing distribution
+-    from collections import Counter
+-    model_counts = Counter()
+-    for r in results:
+-        for m in r.get("models_used", []):
+-            model_counts[m] += 1
+-
+-    print("\n" + "=" * 50)
+-    print("RESULTS: %d/%d correct (%.0f%%), %d/%d complete" % (
+-        correct, total, 100 * correct / total, complete, total))
+-    print("Time: %.0fs" % (time.time() - t0))
+-    print("\nRouting distribution:")
+-    for m, cnt in model_counts.most_common():
+-        print("  %-25s %d" % (m, cnt))
+-    print("\nSaved: %s" % OUT_PATH)
+-
+-
+-if __name__ == "__main__":
+-    asyncio.run(main())
+diff --git a/scripts/data/planner.py b/scripts/data/planner.py
+index e710e5b..1e3a0a4 100644
+--- a/scripts/data/planner.py
++++ b/scripts/data/planner.py
+@@ -63,18 +63,19 @@ def _is_local(api_base: str) -> bool:
+ 
+ 
+ def _make_llm(model: str, api_base: str, api_key: str,
+-              temperature: float) -> ChatOpenAI:
++              temperature: float, with_tools: bool = True) -> ChatOpenAI:
+     extra = {"max_tokens": PLANNER_MAX_TOKENS}
+     if not _is_local(api_base):
+         extra["enable_thinking"] = False
+-    return ChatOpenAI(
++    llm = ChatOpenAI(
+         model=model,
+         base_url=api_base,
+         api_key=api_key or "none",
+         temperature=temperature,
+         timeout=120,
+         model_kwargs={"extra_body": extra},
+-    ).bind_tools(PLANNER_TOOLS)
++    )
++    return llm.bind_tools(PLANNER_TOOLS) if with_tools else llm
+ 
+ 
+ def _handle_tool_calls(ai_msg, execute_fn_result, subtasks, messages):
+@@ -137,12 +138,50 @@ def _serialise_messages(messages: list) -> list[dict]:
+ 
+ 
+ def _parse_text_tool_call(text: str) -> list[dict] | None:
+-    """Fallback: parse <tool_call> tags when vLLM returns them as plain text."""
++    """Fallback: extract tool calls when the model writes them as plain text.
++
++    Handles three formats that weaker models produce:
++    1. <tool_call>{"name": "finish", "arguments": {...}}</tool_call>
++    2. finish(answer)  /  plan_subtask(instruction, task_id)
++    3. Bare JSON: {"name": "finish", "arguments": {...}}
++    """
++    # --- Format 1: <tool_call> tags ---
+     m = re.search(r'<tool_call>\s*(\{.+?)(?:</tool_call>|$)', text, re.DOTALL)
++    if m:
++        return _try_parse_json_tool(m.group(1).strip())
++
++    # --- Format 2: finish(...) as plain text ---
++    # Match finish("72"), finish(72), Finish('72'), FINISH(some text)
++    m = re.search(r'\bfinish\(\s*["\']?(.+?)["\']?\s*\)', text, re.IGNORECASE)
++    if m:
++        answer = m.group(1).strip().strip("\"'")
++        return [{"name": "finish", "args": {"answer": answer}, "id": "text_fallback"}]
++
++    # Match plan_subtask("instruction", "task_id") — rare but possible
++    m = re.search(
++        r'\bplan_subtask\(\s*["\'](.+?)["\']'
++        r'(?:\s*,\s*["\'](\w+)["\'])?\s*\)',
++        text, re.DOTALL,
++    )
++    if m:
++        instruction = m.group(1).strip()
++        task_id = m.group(2) or "t1"
++        return [{"name": "plan_subtask",
++                 "args": {"instruction": instruction, "task_id": task_id},
++                 "id": "text_fallback"}]
++
++    # --- Format 3: bare JSON (may contain nested braces) ---
++    m = re.search(r'(\{"name"\s*:\s*"(?:finish|plan_subtask)"[^}]*\{[^}]*\}[^}]*\})', text, re.DOTALL)
+     if not m:
+-        return None
+-    raw = m.group(1).strip()
+-    # Fix LaTeX backslashes for JSON parsing
++        m = re.search(r'(\{"name"\s*:\s*"(?:finish|plan_subtask)"[^}]*\})', text, re.DOTALL)
++    if m:
++        return _try_parse_json_tool(m.group(1).strip())
++
++    return None
++
++
++def _try_parse_json_tool(raw: str) -> list[dict] | None:
++    """Try to parse a JSON string as a tool call dict."""
+     fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
+     for candidate in [raw, fixed]:
+         try:
+@@ -166,6 +205,36 @@ _NUDGE = HumanMessage(
+             "or plan_subtask() to continue.",
+ )
+ 
++# How many consecutive empty responses before we switch to no-tools fallback
++_MAX_EMPTY_BEFORE_FREEFORM = 2
++
++_FREEFORM_PROMPT = HumanMessage(
++    content="Solve the problem above step by step. "
++            "At the end, write your final answer on its own line as: "
++            "ANSWER: <value>",
++)
++
++
++def _extract_answer_from_text(text: str) -> str | None:
++    """Try to extract a final answer from free-form model text.
++
++    Looks for explicit markers first, then falls back to the last
++    number/expression on its own line.
++    """
++    # Explicit marker: ANSWER: xxx  or  answer: xxx  or  The answer is xxx
++    m = re.search(
++        r'(?:ANSWER|answer|Answer|the answer is)[:\s]+(.+?)(?:\n|$)', text,
++    )
++    if m:
++        return m.group(1).strip().rstrip(".")
++
++    # Fallback: last standalone number/expression line
++    for line in reversed(text.strip().splitlines()):
++        line = line.strip()
++        if re.fullmatch(r'[-+]?\d[\d,./]*', line):
++            return line
++    return None
++
+ 
+ def _build_result(messages, answer, complete, subtasks):
+     return {
+@@ -194,6 +263,7 @@ def run_planner(
+         HumanMessage(content=question),
+     ]
+     answer, complete, subtasks = None, False, []
++    empty_streak = 0
+ 
+     for step in range(MAX_STEPS):
+         try:
+@@ -205,6 +275,7 @@ def run_planner(
+         messages.append(ai_msg)
+ 
+         if ai_msg.tool_calls:
++            empty_streak = 0
+             answer, complete = _handle_tool_calls(
+                 ai_msg, execute_subtask_fn, subtasks, messages)
+             if complete:
+@@ -213,11 +284,21 @@ def run_planner(
+ 
+         text = (ai_msg.content or "").strip()
+         if not text:
+-            logger.warning("[Planner] Empty response at step %d", step)
++            empty_streak += 1
++            logger.warning("[Planner] Empty response at step %d (streak=%d)", step, empty_streak)
++            if empty_streak >= _MAX_EMPTY_BEFORE_FREEFORM:
++                # No-tools fallback: let the model answer freely
++                answer, complete = _freeform_fallback_sync(
++                    model, api_base, api_key, temperature, messages)
++                if complete:
++                    break
++                # freeform also failed, give up
++                break
+             messages.append(_NUDGE)
+             continue
+ 
+-        # Fallback: vLLM sometimes returns <tool_call> as plain text
++        empty_streak = 0
++        # Fallback: model wrote tool call as plain text
+         parsed = _parse_text_tool_call(text)
+         if parsed:
+             logger.info("[Planner] Parsed tool call from plain text at step %d", step)
+@@ -237,11 +318,71 @@ def run_planner(
+                 break
+             continue
+ 
+-        logger.info("[Planner] Plain text at step %d", step)
++        # Plain text with reasoning but no finish — try to extract answer
++        extracted = _extract_answer_from_text(text)
++        if extracted:
++            logger.info("[Planner] Extracted answer from plain text at step %d", step)
++            answer = extracted
++            complete = True
++            break
++
++        logger.info("[Planner] Plain text at step %d (no answer found)", step)
+ 
+     return _build_result(messages, answer, complete, subtasks)
+ 
+ 
++def _freeform_fallback_sync(model, api_base, api_key, temperature, messages):
++    """Retry without tools — let the model answer in free-form text."""
++    logger.info("[Planner] Freeform fallback: retrying without tools")
++    llm_no_tools = _make_llm(model, api_base, api_key, temperature, with_tools=False)
++    # Build a clean 2-message prompt: system + question (skip the failed tool attempts)
++    clean_msgs = [m for m in messages[:2]]  # system + user
++    clean_msgs.append(_FREEFORM_PROMPT)
++    try:
++        ai_msg = llm_no_tools.invoke(clean_msgs)
++        text = (ai_msg.content or "").strip()
++        messages.append(ai_msg)
++        if text:
++            # Try text tool-call parse first, then raw extraction
++            parsed = _parse_text_tool_call(text)
++            if parsed and parsed[0]["name"] == "finish":
++                answer = parsed[0]["args"].get("answer", "")
++                logger.info("[Planner] Freeform fallback: parsed finish(%s)", answer)
++                return answer, True
++            extracted = _extract_answer_from_text(text)
++            if extracted:
++                logger.info("[Planner] Freeform fallback: extracted '%s'", extracted)
++                return extracted, True
++    except Exception as e:
++        logger.warning("[Planner] Freeform fallback error: %s", e)
++    return None, False
++
++
++async def _freeform_fallback_async(model, api_base, api_key, temperature, messages):
++    """Async version of freeform fallback."""
++    logger.info("[Planner] Freeform fallback: retrying without tools")
++    llm_no_tools = _make_llm(model, api_base, api_key, temperature, with_tools=False)
++    clean_msgs = [m for m in messages[:2]]
++    clean_msgs.append(_FREEFORM_PROMPT)
++    try:
++        ai_msg = await llm_no_tools.ainvoke(clean_msgs)
++        text = (ai_msg.content or "").strip()
++        messages.append(ai_msg)
++        if text:
++            parsed = _parse_text_tool_call(text)
++            if parsed and parsed[0]["name"] == "finish":
++                answer = parsed[0]["args"].get("answer", "")
++                logger.info("[Planner] Freeform fallback: parsed finish(%s)", answer)
++                return answer, True
++            extracted = _extract_answer_from_text(text)
++            if extracted:
++                logger.info("[Planner] Freeform fallback: extracted '%s'", extracted)
++                return extracted, True
++    except Exception as e:
++        logger.warning("[Planner] Freeform fallback error: %s", e)
++    return None, False
++
++
+ # ---------------------------------------------------------------------------
+ # Async entry point
+ # ---------------------------------------------------------------------------
+@@ -253,14 +394,16 @@ async def arun_planner(
+     api_key: str,
+     execute_subtask_fn: Callable[[str, str], Awaitable[str]],
+     temperature: float = 0.7,
++    system_prompt: str | None = None,
+ ) -> dict:
+     """Async version — execute_subtask_fn must be an async callable."""
+     llm = _make_llm(model, api_base, api_key, temperature)
+     messages: list = [
+-        SystemMessage(content=build_system_prompt("planner")),
++        SystemMessage(content=system_prompt or build_system_prompt("planner")),
+         HumanMessage(content=question),
+     ]
+     answer, complete, subtasks = None, False, []
++    empty_streak = 0
+ 
+     for step in range(MAX_STEPS):
+         try:
+@@ -272,6 +415,7 @@ async def arun_planner(
+         messages.append(ai_msg)
+ 
+         if ai_msg.tool_calls:
++            empty_streak = 0
+             for tc in ai_msg.tool_calls:
+                 name = tc["name"]
+                 args = tc["args"]
+@@ -302,11 +446,19 @@ async def arun_planner(
+ 
+         text = (ai_msg.content or "").strip()
+         if not text:
+-            logger.warning("[Planner] Empty response at step %d", step)
++            empty_streak += 1
++            logger.warning("[Planner] Empty response at step %d (streak=%d)", step, empty_streak)
++            if empty_streak >= _MAX_EMPTY_BEFORE_FREEFORM:
++                answer, complete = await _freeform_fallback_async(
++                    model, api_base, api_key, temperature, messages)
++                if complete:
++                    break
++                break
+             messages.append(_NUDGE)
+             continue
+ 
+-        # Fallback: vLLM sometimes returns <tool_call> as plain text
++        empty_streak = 0
++        # Fallback: model wrote tool call as plain text
+         parsed = _parse_text_tool_call(text)
+         if parsed:
+             logger.info("[Planner] Parsed tool call from plain text at step %d", step)
+@@ -326,6 +478,14 @@ async def arun_planner(
+                 break
+             continue
+ 
+-        logger.info("[Planner] Plain text at step %d", step)
++        # Plain text with reasoning but no finish — try to extract answer
++        extracted = _extract_answer_from_text(text)
++        if extracted:
++            logger.info("[Planner] Extracted answer from plain text at step %d", step)
++            answer = extracted
++            complete = True
++            break
++
++        logger.info("[Planner] Plain text at step %d (no answer found)", step)
+ 
+     return _build_result(messages, answer, complete, subtasks)
+diff --git a/scripts/figures/topology_hierarchy.py b/scripts/figures/topology_hierarchy.py
+deleted file mode 100644
+index 9bac891..0000000
+--- a/scripts/figures/topology_hierarchy.py
++++ /dev/null
+@@ -1,125 +0,0 @@
+-"""Generate the topology hierarchy figure for the paper (Section 3, Data Selection)."""
+-
+-import os
+-import matplotlib.pyplot as plt
+-import matplotlib.patches as mpatches
+-
+-fig, axes = plt.subplots(1, 4, figsize=(18, 5.5))
+-fig.subplots_adjust(wspace=0.08, bottom=0.28, top=0.75, left=0.03, right=0.97)
+-
+-LEVELS = [
+-    {
+-        "name": "Atomic",
+-        "constraint": "|V| = 1",
+-        "learns": "When not to\ndecompose",
+-        "sources": "GSM8K",
+-        "quota": "500",
+-        "nodes": [(0.5, 0.5)],
+-        "edges": [],
+-    },
+-    {
+-        "name": "Path",
+-        "constraint": "Linear chain, deg ≤ 1",
+-        "learns": "Sequential\ndelegation",
+-        "sources": "NuminaMath, HotpotQA",
+-        "quota": "1.5k each",
+-        "nodes": [(0.5, 0.85), (0.5, 0.5), (0.5, 0.15)],
+-        "edges": [(0, 1), (1, 2)],
+-    },
+-    {
+-        "name": "Tree",
+-        "constraint": "Allow branching (out-deg > 1)",
+-        "learns": "Explore alternative\ndecomposition paths",
+-        "sources": "MuSiQue",
+-        "quota": "1.5k",
+-        "nodes": [(0.5, 0.85), (0.25, 0.45), (0.75, 0.45), (0.12, 0.1), (0.38, 0.1)],
+-        "edges": [(0, 1), (0, 2), (1, 3), (1, 4)],
+-    },
+-    {
+-        "name": "DAG",
+-        "constraint": "Allow fan-in (in-deg > 1)",
+-        "learns": "Parallel sub-tasks +\ntool chaining",
+-        "sources": "DROP, TACO, ToolACE",
+-        "quota": "1.5k + 1.75k each",
+-        "nodes": [(0.5, 0.9), (0.2, 0.55), (0.8, 0.55), (0.5, 0.55), (0.5, 0.15)],
+-        "edges": [(0, 1), (0, 2), (0, 3), (1, 4), (2, 4), (3, 4)],
+-    },
+-]
+-
+-NODE_COLOR = "#4A90D9"
+-EDGE_COLOR = "#555555"
+-BG_COLORS = ["#f0f7ff", "#e8f4e8", "#fff8e0", "#fce8e8"]
+-BORDER_COLORS = ["#4A90D9", "#5cb85c", "#f0ad4e", "#d9534f"]
+-
+-for ax, level, bg, bc in zip(axes, LEVELS, BG_COLORS, BORDER_COLORS):
+-    ax.set_xlim(-0.15, 1.15)
+-    ax.set_ylim(-0.15, 1.15)
+-    ax.set_aspect("equal")
+-    ax.axis("off")
+-
+-    # Background box
+-    rect = mpatches.FancyBboxPatch(
+-        (-0.1, -0.1), 1.2, 1.2,
+-        boxstyle="round,pad=0.05", facecolor=bg, edgecolor=bc, linewidth=2.5
+-    )
+-    ax.add_patch(rect)
+-
+-    # Draw edges
+-    for i, j in level["edges"]:
+-        x0, y0 = level["nodes"][i]
+-        x1, y1 = level["nodes"][j]
+-        ax.annotate(
+-            "", xy=(x1, y1), xytext=(x0, y0),
+-            arrowprops=dict(
+-                arrowstyle="-|>", color=EDGE_COLOR, lw=1.8,
+-                shrinkA=10, shrinkB=10,
+-            ),
+-        )
+-
+-    # Draw nodes
+-    for x, y in level["nodes"]:
+-        circle = plt.Circle((x, y), 0.08, color=NODE_COLOR, ec="white", lw=1.5, zorder=5)
+-        ax.add_patch(circle)
+-
+-    # Topology name — above the box
+-    ax.text(0.5, 1.22, level["name"], ha="center", va="bottom",
+-            fontsize=17, fontweight="bold", color=bc, transform=ax.transAxes)
+-
+-    # Constraint — smaller, below the name
+-    ax.text(0.5, 1.15, level["constraint"], ha="center", va="bottom",
+-            fontsize=9, color="#777777", style="italic", transform=ax.transAxes)
+-
+-    # "Router learns" — below the box
+-    ax.text(0.5, -0.12, level["learns"], ha="center", va="top",
+-            fontsize=9.5, color="#333333", transform=ax.transAxes)
+-
+-    # Sources — bold, colored
+-    ax.text(0.5, -0.32, level["sources"], ha="center", va="top",
+-            fontsize=10, fontweight="bold", color=bc, transform=ax.transAxes)
+-
+-    # Quota — gray
+-    ax.text(0.5, -0.42, f"n = {level['quota']}", ha="center", va="top",
+-            fontsize=9, color="#999999", transform=ax.transAxes)
+-
+-# Bottom arrow
+-fig.patches.append(mpatches.FancyArrowPatch(
+-    (0.06, 0.10), (0.96, 0.10),
+-    arrowstyle="-|>", mutation_scale=20,
+-    color="#aaaaaa", lw=1.5,
+-    transform=fig.transFigure, clip_on=False,
+-))
+-fig.text(0.51, 0.06, "Increasing topological complexity  →", ha="center", va="center",
+-         fontsize=11, color="#aaaaaa", style="italic")
+-
+-# Suptitle
+-fig.suptitle(
+-    "Training data selection by reasoning topology (Besta et al., 2024)",
+-    fontsize=14, y=0.98, fontweight="bold", color="#333333",
+-)
+-
+-out_path = "docs/figures/topology_hierarchy.pdf"
+-os.makedirs(os.path.dirname(out_path), exist_ok=True)
+-fig.savefig(out_path, dpi=300, bbox_inches="tight")
+-fig.savefig(out_path.replace(".pdf", ".png"), dpi=300, bbox_inches="tight")
+-print(f"Saved: {out_path} and .png")
+-plt.close()
+diff --git a/scripts/run_round1.sh b/scripts/run_round1.sh
+index 714b611..e5e5a9a 100755
+--- a/scripts/run_round1.sh
++++ b/scripts/run_round1.sh
+@@ -1,6 +1,7 @@
+ #!/bin/bash
+ # Round 1: Full bootstrapped curriculum filtering (~10k tasks)
+ # Pipeline: Router probe (pass@3) → Teacher trajectory → Overlong filter → SFT/RL split
++# All API calls go through xiaojingai. No Qwen in sub-agent pool.
+ set -euo pipefail
+ 
+ PYTHON=/home/xieht/.conda/envs/marl/bin/python
+@@ -8,22 +9,25 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ 
+ # Planner + Router: local Qwen 2.5 7B
+ PLANNER_MODEL="Qwen/Qwen2.5-7B-Instruct"
+-PLANNER_API_BASE="http://localhost:8234/v1"
++PLANNER_API_BASE="http://localhost:8236/v1"
+ ROUTER_MODEL="Qwen/Qwen2.5-7B-Instruct"
+-ROUTER_API_BASE="http://localhost:8234/v1"
++ROUTER_API_BASE="http://localhost:8236/v1"
+ 
+-SUB_API_BASE="https://dashscope.aliyuncs.com/compatible-mode/v1"
+-SUB_API_KEY="sk-70793c3ec75a40ca90b7076de9927260"
++# Teacher + Sub-agent: all xiaojingai
++API_BASE="https://open.xiaojingai.com/v1/"
++API_KEY="sk-wFh8h2dhytX3J7ywOZld4IVWoEoBr8hZ8DonD60UYHDZSrYT"
+ TEACHER_MODEL="qwen3.5-plus"
+-TEACHER_API_BASE="https://dashscope.aliyuncs.com/compatible-mode/v1"
+-TEACHER_API_KEY="sk-70793c3ec75a40ca90b7076de9927260"
++
+ OUT_DIR="${REPO_ROOT}/data/sft/round1"
+ CONCURRENCY=32
+ SEED=42
+ 
++mkdir -p "${OUT_DIR}"
++
+ echo "=== Round 1: Bootstrapped Curriculum Filtering ==="
+ echo "Planner/Router: ${PLANNER_MODEL} @ ${PLANNER_API_BASE}"
+-echo "Teacher:        ${TEACHER_MODEL} @ ${TEACHER_API_BASE}"
++echo "Teacher:        ${TEACHER_MODEL} @ ${API_BASE}"
++echo "Sub-agent:      ${API_BASE} (no Qwen in pool)"
+ echo "Concurrency:    ${CONCURRENCY}"
+ echo "Output:         ${OUT_DIR}"
+ echo ""
+@@ -36,10 +40,10 @@ $PYTHON "${REPO_ROOT}/scripts/data/generate_trajectories.py" \
+     --router-api-base "${ROUTER_API_BASE}" \
+     --router-api-key "none" \
+     --teacher-model "${TEACHER_MODEL}" \
+-    --teacher-api-base "${TEACHER_API_BASE}" \
+-    --teacher-api-key "${TEACHER_API_KEY}" \
+-    --sub-model-api-base "${SUB_API_BASE}" \
+-    --sub-model-api-key "${SUB_API_KEY}" \
++    --teacher-api-base "${API_BASE}" \
++    --teacher-api-key "${API_KEY}" \
++    --sub-model-api-base "${API_BASE}" \
++    --sub-model-api-key "${API_KEY}" \
+     --out-dir "${OUT_DIR}" \
+     --concurrency "${CONCURRENCY}" \
+     --seed "${SEED}"
+diff --git a/scripts/run_round1_q3.sh b/scripts/run_round1_q3.sh
+index feaa663..47854ae 100755
+--- a/scripts/run_round1_q3.sh
++++ b/scripts/run_round1_q3.sh
+@@ -1,27 +1,21 @@
+ #!/bin/bash
+-# Round 1 (Qwen3-4B): Same pipeline as round1 but with Qwen3-4B-Instruct as planner/router
+-# GPU 5: vLLM Qwen3-4B-Instruct @ port 8235
+-# Teacher: qwen3.5-plus (DashScope, same as round1)
+-# Sub-agent: xiaojingai API
++# Round 1 (Qwen3-4B): Same pipeline but with Qwen3-4B-Instruct as planner/router
++# All API calls go through xiaojingai. No Qwen in sub-agent pool.
+ set -euo pipefail
+ 
+ PYTHON=/home/xieht/.conda/envs/marl/bin/python
+ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ 
+-# Planner + Router: local Qwen3-4B-Instruct (GPU 5, port 8235)
++# Planner + Router: local Qwen3-4B-Instruct (GPU 4, port 8234)
+ PLANNER_MODEL="Qwen/Qwen3-4B-Instruct"
+-PLANNER_API_BASE="http://localhost:8235/v1"
++PLANNER_API_BASE="http://localhost:8234/v1"
+ ROUTER_MODEL="Qwen/Qwen3-4B-Instruct"
+-ROUTER_API_BASE="http://localhost:8235/v1"
++ROUTER_API_BASE="http://localhost:8234/v1"
+ 
+-# Teacher: DashScope qwen3.5-plus (same as round1)
++# Teacher + Sub-agent: all xiaojingai
++API_BASE="https://open.xiaojingai.com/v1/"
++API_KEY="sk-7Yv0jGTYpFErrvpnVIlz3cGOtxIuwucfMT5fSxYalwVWprL0"
+ TEACHER_MODEL="qwen3.5-plus"
+-TEACHER_API_BASE="https://dashscope.aliyuncs.com/compatible-mode/v1"
+-TEACHER_API_KEY="sk-70793c3ec75a40ca90b7076de9927260"
+-
+-# Sub-agent: xiaojingai
+-SUB_API_BASE="https://open.xiaojingai.com/v1/"
+-SUB_API_KEY="sk-7Yv0jGTYpFErrvpnVIlz3cGOtxIuwucfMT5fSxYalwVWprL0"
+ 
+ OUT_DIR="${REPO_ROOT}/data/sft/round1_q3"
+ CONCURRENCY=32
+@@ -29,10 +23,10 @@ SEED=42
+ 
+ mkdir -p "${OUT_DIR}"
+ 
+-echo "=== Round 1 (Qwen3-4B): Bootstrapped Curriculum Filtering ==="
++echo "=== Round 1 (Qwen3-4B-Instruct): Bootstrapped Curriculum Filtering ==="
+ echo "Planner/Router: ${PLANNER_MODEL} @ ${PLANNER_API_BASE}"
+-echo "Teacher:        ${TEACHER_MODEL} @ ${TEACHER_API_BASE}"
+-echo "Sub-agent:      ${SUB_API_BASE}"
++echo "Teacher:        ${TEACHER_MODEL} @ ${API_BASE}"
++echo "Sub-agent:      ${API_BASE} (no Qwen in pool)"
+ echo "Concurrency:    ${CONCURRENCY}"
+ echo "Output:         ${OUT_DIR}"
+ echo ""
+@@ -45,10 +39,10 @@ $PYTHON "${REPO_ROOT}/scripts/data/generate_trajectories.py" \
+     --router-api-base "${ROUTER_API_BASE}" \
+     --router-api-key "none" \
+     --teacher-model "${TEACHER_MODEL}" \
+-    --teacher-api-base "${TEACHER_API_BASE}" \
+-    --teacher-api-key "${TEACHER_API_KEY}" \
+-    --sub-model-api-base "${SUB_API_BASE}" \
+-    --sub-model-api-key "${SUB_API_KEY}" \
++    --teacher-api-base "${API_BASE}" \
++    --teacher-api-key "${API_KEY}" \
++    --sub-model-api-base "${API_BASE}" \
++    --sub-model-api-key "${API_KEY}" \
+     --out-dir "${OUT_DIR}" \
+     --concurrency "${CONCURRENCY}" \
+     --seed "${SEED}"
