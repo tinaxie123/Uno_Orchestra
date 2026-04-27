@@ -32,12 +32,17 @@
 !verl/
 !verl/**
 
-# Keep data configs and RL training data.
+# Keep data configs and RL pool metadata (build_stats / README only —
+# parquet artefacts are too large for git, regenerate via
+# scripts/rl/prepare_prompt_pool.py and consult data/rl/build_stats.json
+# for the exact build command and category distribution).
 !data/
 !data/*.yaml
 !data/*.md
 !data/rl/
-!data/rl/**
+!data/rl/*.json
+!data/rl/*.md
+!data/rl/*.yaml
 
 # macOS / editor noise
 .DS_Store

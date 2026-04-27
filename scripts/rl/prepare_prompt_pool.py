@@ -42,6 +42,22 @@ import pyarrow.parquet as pq
 _CODE_SOURCES = {"taco", "codeforces_cots", "codecontests"}
 
 
+# ── Per-source category override ────────────────────────────────────
+# The upstream `category` column lumps several atomic single-shot tasks
+# (competitive-programming TACO/Codeforces, ToolACE function-call traces)
+# under labels that don't match the paper's capability taxonomy. In
+# particular `tool_orchestration` is reserved for true multi-agent
+# decompose-and-route tasks; ToolACE and code benchmarks are single-shot.
+# Override here so per-`data_source` metrics aggregate honestly. Keys are
+# the underlying benchmark `source`.
+_SOURCE_CATEGORY_OVERRIDE = {
+    "taco": "code_generation",
+    "codeforces_cots": "code_generation",
+    "codecontests": "code_generation",
+    "toolace": "function_calling",
+}
+
+
 def _clean_question(q: str) -> str:
     """Strip teacher-prompt decorations from the `question` column.
 
@@ -107,57 +123,123 @@ def _parse_input_output(raw: Any) -> dict | None:
     return {"inputs": [str(x) for x in ins], "outputs": [str(x) for x in outs]}
 
 
-def _build_tests_index() -> dict[str, dict]:
-    """Load BAAI/TACO (train+test) and codeforces_cots, return
-    question → tests mapping. Uses HF mirror via HF_ENDPOINT.
+def _hf_parquet_shards(repo: str, pattern: str) -> list[str]:
+    """Return `hf://` URLs for every parquet shard matching `pattern`
+    inside `repo`. Uses HfFileSystem.glob — no script execution.
     """
-    from datasets import load_dataset
+    from huggingface_hub import HfFileSystem
+    fs = HfFileSystem()
+    return [f"hf://{p}" for p in fs.glob(f"datasets/{repo}/{pattern}")]
 
+
+def _build_tests_index() -> dict[str, dict]:
+    """Load BAAI/TACO + open-r1/codeforces-cots + deepmind/code_contests
+    via direct parquet reads (no dataset loading scripts), return
+    question → tests mapping.
+    """
     index: dict[str, dict] = {}
 
-    # --- TACO ---
+    # --- TACO (BAAI/TACO has a script-based loader; read parquet shards
+    # directly). ---
     try:
-        print("[rl-pool] loading BAAI/TACO ...")
-        ds = load_dataset("BAAI/TACO", split="train", trust_remote_code=True)
+        shards = _hf_parquet_shards("BAAI/TACO", "ALL/train-*.parquet")
+        print(f"[rl-pool] loading BAAI/TACO ({len(shards)} shards) ...")
         n_with_tests = 0
-        for row in ds:
-            tests = _parse_input_output(row.get("input_output"))
-            if tests is None:
-                continue
-            key = _normalise_q(row.get("question", ""))
-            if not key:
-                continue
-            index[key] = tests
-            n_with_tests += 1
+        for shard in shards:
+            df = pd.read_parquet(shard, columns=["question", "input_output"])
+            for q, io in zip(df["question"], df["input_output"]):
+                tests = _parse_input_output(io)
+                if tests is None:
+                    continue
+                key = _normalise_q(str(q) if q is not None else "")
+                if not key:
+                    continue
+                index[key] = tests
+                n_with_tests += 1
         print(f"[rl-pool] TACO: {n_with_tests} rows with usable stdin/stdout tests")
     except Exception as e:
         print(f"[rl-pool] WARN: TACO load failed ({e!r}); code rewards will be 0")
 
-    # --- codeforces_cots (open-r1/codeforces-cots) ---
+    # --- codeforces_cots (open-r1/codeforces-cots). Each problem appears
+    # multiple times across configs (one row per teacher solution); the
+    # `solutions/` config is enough to build the question→tests index. ---
     try:
-        print("[rl-pool] loading open-r1/codeforces-cots ...")
-        ds = load_dataset("open-r1/codeforces-cots", split="train", trust_remote_code=True)
+        shards = _hf_parquet_shards("open-r1/codeforces-cots", "solutions/*.parquet")
+        if not shards:
+            shards = _hf_parquet_shards("open-r1/codeforces-cots", "**/*.parquet")
+        print(f"[rl-pool] loading codeforces_cots ({len(shards)} shards) ...")
         n_with_tests = 0
-        for row in ds:
-            tests = _parse_input_output(row.get("input_output"))
-            if tests is None:
-                # try the "examples" field Codeforces sometimes ships
-                ex = row.get("examples")
-                if isinstance(ex, list) and ex:
-                    tests = {
-                        "inputs": [str(e.get("input", "")) for e in ex],
-                        "outputs": [str(e.get("output", "")) for e in ex],
-                    }
-            if tests is None:
-                continue
-            key = _normalise_q(row.get("description", "") or row.get("question", ""))
-            if not key:
-                continue
-            index[key] = tests
-            n_with_tests += 1
+        for shard in shards:
+            df = pd.read_parquet(shard)
+            cols = df.columns
+            for i in range(len(df)):
+                row = df.iloc[i]
+                tests = _parse_input_output(row.get("input_output") if "input_output" in cols else None)
+                if tests is None and "examples" in cols:
+                    ex = row.get("examples")
+                    # Parquet may return list/ndarray/None — normalise.
+                    try:
+                        ex_iter = list(ex) if ex is not None else []
+                    except TypeError:
+                        ex_iter = []
+                    if ex_iter:
+                        try:
+                            ins = [str(e.get("input", "")) for e in ex_iter if hasattr(e, "get")]
+                            outs = [str(e.get("output", "")) for e in ex_iter if hasattr(e, "get")]
+                        except Exception:
+                            ins, outs = [], []
+                        if ins and outs and len(ins) == len(outs):
+                            tests = {"inputs": ins, "outputs": outs}
+                if tests is None:
+                    continue
+                desc = row.get("description") if "description" in cols else None
+                if desc is None or (isinstance(desc, float) and pd.isna(desc)):
+                    desc = row.get("question") if "question" in cols else ""
+                key = _normalise_q(str(desc) if desc is not None else "")
+                if not key:
+                    continue
+                index[key] = tests
+                n_with_tests += 1
         print(f"[rl-pool] codeforces_cots: {n_with_tests} rows with tests")
     except Exception as e:
         print(f"[rl-pool] WARN: codeforces_cots load failed ({e!r})")
+
+    # --- code_contests (deepmind/code_contests). Tests live in
+    # public_tests / private_tests / generated_tests as struct cols
+    # {input: [...], output: [...]}; concatenate all three. ---
+    try:
+        shards = _hf_parquet_shards("deepmind/code_contests", "data/train-*.parquet")
+        print(f"[rl-pool] loading deepmind/code_contests ({len(shards)} shards) ...")
+        n_with_tests = 0
+        for shard in shards:
+            df = pd.read_parquet(
+                shard,
+                columns=["description", "public_tests", "private_tests", "generated_tests"],
+            )
+            for i in range(len(df)):
+                row = df.iloc[i]
+                ins: list[str] = []
+                outs: list[str] = []
+                for bucket_name in ("public_tests", "private_tests", "generated_tests"):
+                    bucket = row.get(bucket_name)
+                    if bucket is None or not hasattr(bucket, "get"):
+                        continue
+                    bi = bucket.get("input")
+                    bo = bucket.get("output")
+                    if bi is None or bo is None:
+                        continue
+                    ins.extend(str(x) for x in bi)
+                    outs.extend(str(x) for x in bo)
+                if not ins or not outs or len(ins) != len(outs):
+                    continue
+                key = _normalise_q(str(row.get("description") or ""))
+                if not key:
+                    continue
+                index[key] = {"inputs": ins, "outputs": outs}
+                n_with_tests += 1
+        print(f"[rl-pool] code_contests: {n_with_tests} rows with tests")
+    except Exception as e:
+        print(f"[rl-pool] WARN: code_contests load failed ({e!r})")
 
     print(f"[rl-pool] total test-index size: {len(index)}")
     return index
@@ -208,6 +290,7 @@ def main():
         row = df.iloc[idx]
         source = str(row.get("source", "unknown"))
         category = str(row.get("category", "unknown"))
+        category = _SOURCE_CATEGORY_OVERRIDE.get(source.lower(), category)
         question = _clean_question(str(row.get("question", "")))
         gold = str(row.get("gold_answer", "")).strip()
 

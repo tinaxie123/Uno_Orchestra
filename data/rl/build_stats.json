@@ -1,0 +1,220 @@
+{
+  "generated_at": "2026-04-27T12:07:34",
+  "build_command": "python scripts/rl/prepare_prompt_pool.py --input data/sft/hf_release/sft_full_clean/train.parquet --system-prompt data/sft/hf_release/system_prompt.txt --output-train data/rl/train.parquet --output-val data/rl/val.parquet --val-ratio 0.05 --seed 42",
+  "inputs": {
+    "sft_corpus": "data/sft/hf_release/sft_full_clean/train.parquet (61201 rows)",
+    "hf_test_indices": {
+      "BAAI/TACO": 21809,
+      "open-r1/codeforces-cots (solutions/)": 46900,
+      "deepmind/code_contests": 13315
+    }
+  },
+  "category_remap": {
+    "taco": "code_generation",
+    "codeforces_cots": "code_generation",
+    "codecontests": "code_generation",
+    "toolace": "function_calling"
+  },
+  "splits": {
+    "train": {
+      "rows": 58107,
+      "data_source": {
+        "qa_multi_hop": 30344,
+        "reasoning_commonsense": 8021,
+        "qa_open_domain": 6479,
+        "knowledge_academic": 5907,
+        "math": 4361,
+        "code_generation": 2052,
+        "function_calling": 679,
+        "reading_comprehension": 264
+      },
+      "sources_per_data_source": {
+        "math": {
+          "numinamath": 189,
+          "gsm8k_main": 1790,
+          "hendrycks_math_intermediate_algebra": 743,
+          "hendrycks_math_number_theory": 663,
+          "hendrycks_math_algebra": 940,
+          "gsm8k": 36
+        },
+        "reasoning_commonsense": {
+          "social_iqa": 764,
+          "strategyqa": 1388,
+          "winogrande": 678,
+          "commonsenseqa": 1606,
+          "folio": 537,
+          "bbh_formal_fallacies": 203,
+          "arc_challenge": 965,
+          "bbh_logical_deduction": 192,
+          "logiqa2": 735,
+          "piqa": 953
+        },
+        "qa_multi_hop": {
+          "hotpotqa_fullwiki": 20246,
+          "musique_answerable": 3845,
+          "2wikimultihopqa": 5855,
+          "hotpotqa": 216,
+          "musique": 182
+        },
+        "qa_open_domain": {
+          "triviaqa_nocontext": 1891,
+          "nq_open": 2826,
+          "webquestions": 933,
+          "quality": 829
+        },
+        "knowledge_academic": {
+          "mmlu_aux_stem": 1593,
+          "sciq": 2914,
+          "aqua_rat": 608,
+          "openbookqa": 785,
+          "theoremqa": 2,
+          "legalbench": 5
+        },
+        "function_calling": {
+          "toolace": 679
+        },
+        "code_generation": {
+          "codeforces_cots": 986,
+          "taco": 1016,
+          "codecontests": 50
+        },
+        "reading_comprehension": {
+          "drop": 264
+        }
+      },
+      "env_kwargs_tests_coverage": {
+        "math": {
+          "with_tests": 0,
+          "without": 4361
+        },
+        "reasoning_commonsense": {
+          "with_tests": 0,
+          "without": 8021
+        },
+        "qa_multi_hop": {
+          "with_tests": 0,
+          "without": 30344
+        },
+        "qa_open_domain": {
+          "with_tests": 0,
+          "without": 6479
+        },
+        "knowledge_academic": {
+          "with_tests": 0,
+          "without": 5907
+        },
+        "function_calling": {
+          "with_tests": 0,
+          "without": 679
+        },
+        "code_generation": {
+          "with_tests": 1900,
+          "without": 152
+        },
+        "reading_comprehension": {
+          "with_tests": 0,
+          "without": 264
+        }
+      }
+    },
+    "val": {
+      "rows": 3058,
+      "data_source": {
+        "qa_multi_hop": 1613,
+        "reasoning_commonsense": 444,
+        "qa_open_domain": 308,
+        "knowledge_academic": 301,
+        "math": 236,
+        "code_generation": 105,
+        "function_calling": 26,
+        "reading_comprehension": 25
+      },
+      "sources_per_data_source": {
+        "knowledge_academic": {
+          "mmlu_aux_stem": 77,
+          "sciq": 152,
+          "openbookqa": 35,
+          "aqua_rat": 37
+        },
+        "reasoning_commonsense": {
+          "strategyqa": 85,
+          "social_iqa": 44,
+          "commonsenseqa": 94,
+          "logiqa2": 35,
+          "arc_challenge": 56,
+          "winogrande": 31,
+          "folio": 25,
+          "piqa": 52,
+          "bbh_formal_fallacies": 14,
+          "bbh_logical_deduction": 8
+        },
+        "qa_open_domain": {
+          "webquestions": 38,
+          "nq_open": 136,
+          "quality": 43,
+          "triviaqa_nocontext": 91
+        },
+        "qa_multi_hop": {
+          "hotpotqa_fullwiki": 1072,
+          "musique_answerable": 207,
+          "2wikimultihopqa": 315,
+          "hotpotqa": 12,
+          "musique": 7
+        },
+        "math": {
+          "hendrycks_math_number_theory": 29,
+          "gsm8k_main": 102,
+          "hendrycks_math_algebra": 52,
+          "hendrycks_math_intermediate_algebra": 42,
+          "numinamath": 8,
+          "gsm8k": 3
+        },
+        "function_calling": {
+          "toolace": 26
+        },
+        "reading_comprehension": {
+          "drop": 25
+        },
+        "code_generation": {
+          "codeforces_cots": 58,
+          "taco": 45,
+          "codecontests": 2
+        }
+      },
+      "env_kwargs_tests_coverage": {
+        "knowledge_academic": {
+          "with_tests": 0,
+          "without": 301
+        },
+        "reasoning_commonsense": {
+          "with_tests": 0,
+          "without": 444
+        },
+        "qa_open_domain": {
+          "with_tests": 0,
+          "without": 308
+        },
+        "qa_multi_hop": {
+          "with_tests": 0,
+          "without": 1613
+        },
+        "math": {
+          "with_tests": 0,
+          "without": 236
+        },
+        "function_calling": {
+          "with_tests": 0,
+          "without": 26
+        },
+        "reading_comprehension": {
+          "with_tests": 0,
+          "without": 25
+        },
+        "code_generation": {
+          "with_tests": 101,
+          "without": 4
+        }
+      }
+    }
+  }
+}
