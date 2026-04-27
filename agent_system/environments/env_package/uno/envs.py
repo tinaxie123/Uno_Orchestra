@@ -16,11 +16,14 @@ Every route gets a real LLM response regardless of skill choice.
 The model must learn which (model, skill) combination actually works.
 """
 
+import logging
 import re
 import string
 import concurrent.futures
 import os
 from typing import Any, Dict, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 import gym
 import numpy as np
@@ -225,6 +228,64 @@ def call_sub_agent_api(model: str, skill: str, query: str, question: str) -> Tup
         return f"API error: {str(e)[:200]}", 0
 
 
+# Hard wall-clock timeout for a single sub-agent call. The OpenAI sync
+# client is configured with timeout=60s + max_retries=1, so a healthy
+# call should top out around ~120s. We give a small margin (150s) and
+# treat anything beyond as a silent hang (already-observed failure mode:
+# step 4 of verify_10step_fix_20260427_213203 stalled >10 min with all
+# GPUs idle and no exception ever raised by the SDK — see
+# project_format_gate_false_positive memory and _hang_evidence/).
+_SUBAGENT_HARD_TIMEOUT_SEC = float(os.environ.get("UNO_SUBAGENT_HARD_TIMEOUT_SEC", "150"))
+# Sized for the rollout concurrency (verl agent loop runs ~8 worker
+# processes × tens of concurrent env.step threads). When a wrapped
+# call hangs at the HTTP layer the underlying thread is leaked until
+# the OS-level TCP timeout fires; with a generous pool the leak is
+# absorbed for a 10-step verify and beyond.
+_SUBAGENT_TIMEOUT_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=int(os.environ.get("UNO_SUBAGENT_TIMEOUT_POOL_SIZE", "256")),
+    thread_name_prefix="uno-subagent-timeout",
+)
+
+
+def call_sub_agent_api_with_hard_timeout(
+    model: str, skill: str, query: str, question: str
+) -> Tuple[str, int, bool]:
+    """Wrap call_sub_agent_api with an outer wall-clock timeout.
+
+    Returns (text, output_tokens, hard_timed_out). On hard-timeout we
+    log a WARNING (so frequency is observable in the agent loop log)
+    and return a sentinel obs string with 0 tokens. The caller must
+    treat hard_timed_out=True as a fatal-for-this-rollout signal:
+    terminate the episode, surface metadata["timeout"]=True so the
+    rollout's done_reason becomes "timeout" and env_terminal_reward
+    becomes 0 via the standard terminal-reward path.
+
+    The wrapped openai SDK call still runs in the background after we
+    return — that thread is leaked until the OS-level TCP timeout
+    eventually fires. This is intentional: the alternative (blocking
+    on the call until it finishes) is exactly the deadlock we're
+    fixing. The pool is sized generously to absorb the rare leak.
+    """
+    fut = _SUBAGENT_TIMEOUT_POOL.submit(
+        call_sub_agent_api, model, skill, query, question
+    )
+    try:
+        text, output_tokens = fut.result(timeout=_SUBAGENT_HARD_TIMEOUT_SEC)
+        return text, output_tokens, False
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            "uno sub-agent hard timeout after %.1fs (model=%s skill=%s "
+            "query=%r) — terminating rollout with done_reason=timeout. "
+            "Underlying thread leaked, will reap when TCP timeout fires.",
+            _SUBAGENT_HARD_TIMEOUT_SEC, model, skill, query[:80],
+        )
+        return (
+            f"<error reason=\"sub_agent_hard_timeout\" after_s=\"{_SUBAGENT_HARD_TIMEOUT_SEC}\"/>",
+            0,
+            True,
+        )
+
+
 from agent_system.environments.env_package.uno.verifiers import verify as _verify_by_source
 
 
@@ -303,11 +364,22 @@ class SingleUnoEnv:
         if is_lazy and not lazy_allowed:
             is_lazy = False
             metadata["lazy_rejected"] = True
-        if has_final and not (has_plan or has_route) and not lazy_allowed:
-            # "<final_answer> without any plan/route" on a source that
-            # requires routing is a lazy bypass in disguise — treat as
-            # malformed so the episode gets 0 reward and the policy
-            # gradient doesn't reinforce gold-mimicry.
+        # Only reject "<final_answer> without plan/route" on the FIRST
+        # turn. By round 2+, the env has already executed at least one
+        # routing turn (otherwise the episode would have been done after
+        # round 1's terminal/format_error path), so a turn-2 message that
+        # only contains <verify> + <final_answer> is the legitimate
+        # "synthesise-after-routing" pattern, not a lazy bypass. Without
+        # this guard, schema-perfect multi-turn rollouts get mis-flagged
+        # format_error and the gradient signal collapses (see verify_10step
+        # canary: 60%+ format_error driven entirely by this false positive).
+        already_routed = self.current_round > 1
+        if (
+            has_final
+            and not (has_plan or has_route)
+            and not lazy_allowed
+            and not already_routed
+        ):
             has_final = False
             metadata["lazy_rejected"] = True
 
@@ -355,10 +427,24 @@ class SingleUnoEnv:
         if routes:
             obs_parts = []
             for round_n, subtask_id, model, skill, query in routes:
-                # Call real API
-                response_text, output_tokens = call_sub_agent_api(
-                    model, skill, query, self.question
-                )
+                # Call real API with an outer hard wall-clock timeout.
+                # On silent SDK hang we terminate THIS rollout immediately
+                # rather than blocking the whole batch's asyncio.gather.
+                response_text, output_tokens, hard_timed_out = \
+                    call_sub_agent_api_with_hard_timeout(
+                        model, skill, query, self.question
+                    )
+
+                if hard_timed_out:
+                    obs_parts.append(
+                        f'<obs subtask="{subtask_id}">{response_text}</obs>'
+                    )
+                    self.done = True
+                    reward = 0.0
+                    metadata["timeout"] = True
+                    metadata["api_hard_timeout"] = True
+                    break
+
                 self.total_output_tokens += output_tokens
 
                 # Compute cost using the ROUTED model's pricing (not qwen-plus actual cost)
