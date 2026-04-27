@@ -1499,6 +1499,18 @@ class RayPPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
+                            # Surface Uno multi-agent rollout diagnostics
+                            # (route count / lazy ratio / API spend /
+                            # done-reason histogram) to the wandb metric
+                            # stream. No-op when the extra-info dict has
+                            # no `env_*` / `done_reason` keys, so this is
+                            # safe for non-uno runs.
+                            try:
+                                from scripts.rl.uno_reward import compute_uno_metrics
+                                metrics.update(compute_uno_metrics(reward_extra_infos_dict))
+                            except ImportError:
+                                pass
+
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(

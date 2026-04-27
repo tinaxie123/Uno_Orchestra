@@ -17,6 +17,14 @@ token of the trajectory — matching the convention that downstream
 GRPO advantage computation expects (one reward per response, placed
 at the EOS-equivalent of the policy's own emission).
 
+This module also exposes ``compute_uno_metrics()``: an aggregator
+called from verl's ray_trainer that turns the per-row diagnostics in
+``reward_extra_infos_dict`` into scalar wandb metrics under the
+``uno/`` namespace (route count, lazy ratio, API spend, done-reason
+histogram). Without this, those fields exist in non_tensor_batch but
+are never surfaced to the metric stream — the run is reward-only and
+opaque to "is the model routing or going lazy".
+
 Why ``response_mask`` and not ``valid_response_length - 1``:
 the Uno rollout is multi-turn with interleaved observation tokens
 (``response_mask`` is 1/0/1/0/...). The "last valid response token"
@@ -142,3 +150,102 @@ class UnoRewardManager(AbstractRewardManager):
                 "reward_extra_info": {k: np.asarray(v, dtype=object) for k, v in reward_extra_info.items()},
             }
         return reward_tensor
+
+
+# Done-reason buckets we explicitly track. Anything not listed lands in
+# `uno/done_reason/other_ratio` so we never silently lose a category.
+_DONE_REASONS = (
+    "final",
+    "lazy",
+    "format_error",
+    "timeout",
+    "response_length",
+    "empty_generation",
+    "max_turns",
+    "done",
+)
+
+
+def compute_uno_metrics(reward_extra_infos_dict: dict[str, list]) -> dict[str, float]:
+    """Aggregate UnoAgentLoop per-rollout diagnostics into scalar metrics.
+
+    Called from verl.trainer.ppo.ray_trainer right after
+    ``reward_extra_infos_dict`` is materialised. Returns a flat dict keyed
+    under the ``uno/`` namespace, ready to ``metrics.update(...)``.
+
+    Quietly returns {} when none of the uno keys are present — that's the
+    expected state for non-uno runs (Search-R1, ToolAgentLoop, etc.) so
+    this aggregator is safe to call unconditionally.
+    """
+    if not reward_extra_infos_dict:
+        return {}
+
+    def _get(key: str) -> list | None:
+        v = reward_extra_infos_dict.get(key)
+        if v is None or len(v) == 0:
+            return None
+        return list(v)
+
+    out: dict[str, float] = {}
+
+    n_routes = _get("env_n_route_calls")
+    if n_routes is not None:
+        arr = np.asarray([int(x) for x in n_routes], dtype=np.int64)
+        out["uno/n_routes/mean"] = float(arr.mean())
+        out["uno/n_routes/max"] = float(arr.max())
+        out["uno/n_routes/min"] = float(arr.min())
+        out["uno/n_routes/sum"] = float(arr.sum())
+        # Fraction of rollouts that issued at least one route — direct
+        # complement of the lazy ratio for cross-checking.
+        out["uno/route_ratio"] = float((arr > 0).mean())
+
+    cost = _get("env_api_cost")
+    if cost is not None:
+        arr = np.asarray([float(x) for x in cost], dtype=np.float64)
+        out["uno/api_cost_usd/mean"] = float(arr.mean())
+        out["uno/api_cost_usd/max"] = float(arr.max())
+        out["uno/api_cost_usd/sum"] = float(arr.sum())
+
+    correctness = _get("env_correctness")
+    if correctness is not None:
+        arr = np.asarray([float(x) for x in correctness], dtype=np.float64)
+        out["uno/correctness/mean"] = float(arr.mean())
+
+    fmt_valid = _get("env_format_valid")
+    if fmt_valid is not None:
+        arr = np.asarray([bool(x) for x in fmt_valid], dtype=bool)
+        out["uno/format_valid_ratio"] = float(arr.mean())
+
+    num_turns = _get("env_num_turns")
+    if num_turns is not None:
+        arr = np.asarray([int(x) for x in num_turns], dtype=np.int64)
+        out["uno/num_turns/mean"] = float(arr.mean())
+        out["uno/num_turns/max"] = float(arr.max())
+
+    n_obs_tok = _get("env_n_obs_tokens")
+    if n_obs_tok is not None:
+        arr = np.asarray([int(x) for x in n_obs_tok], dtype=np.int64)
+        out["uno/n_obs_tokens/mean"] = float(arr.mean())
+        out["uno/n_obs_tokens/sum"] = float(arr.sum())
+
+    term_reward = _get("env_terminal_reward")
+    if term_reward is not None:
+        arr = np.asarray([float(x) for x in term_reward], dtype=np.float64)
+        out["uno/terminal_reward/mean"] = float(arr.mean())
+
+    done = _get("done_reason")
+    if done is not None:
+        labels = [str(x) if x is not None else "unknown" for x in done]
+        n = len(labels)
+        seen = set()
+        for r in _DONE_REASONS:
+            cnt = sum(1 for x in labels if x == r)
+            out[f"uno/done_reason/{r}_ratio"] = float(cnt) / float(n)
+            seen.add(r)
+        other = sum(1 for x in labels if x not in seen)
+        out["uno/done_reason/other_ratio"] = float(other) / float(n)
+        # Convenience aliases for the two most paper-relevant categories.
+        out["uno/lazy_ratio"] = out["uno/done_reason/lazy_ratio"]
+        out["uno/format_error_ratio"] = out["uno/done_reason/format_error_ratio"]
+
+    return out

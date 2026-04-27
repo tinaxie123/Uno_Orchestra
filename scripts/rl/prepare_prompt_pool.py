@@ -5,13 +5,18 @@ Input schema (tinaxie/Uno-Curriculum `sft_full`):
     distillation_pass, n_plan_rounds, n_subtasks, conversations
 
 Output row (verl RL prompt convention):
-    prompt         — JSON [{"role":"system", ...}, {"role":"user", ...}]
+    prompt         — list[{"role":"system", ...}, {"role":"user", ...}]
     data_source    — category (for per-source reward routing)
     ability        — "routing"
-    reward_model   — JSON {"ground_truth": str}
-    extra_info     — JSON {"question", "gold", "source", "tests"?}
-    env_kwargs     — JSON {"question", "ground_truth", "data_source",
-                           "source", "tests"?}
+    reward_model   — {"ground_truth": str}
+    extra_info     — {"question", "gold", "source", "category", "tests"}
+    env_kwargs     — {"question", "ground_truth", "data_source",
+                       "source", "tests"}
+
+Note: prompt/reward_model/extra_info/env_kwargs are written as native
+parquet structs (not JSON strings) — verl's RLHFDataset.__getitem__
+calls `.get()` on these fields directly, so they must round-trip as
+dicts/lists, not strings.
 
 For TACO / codeforces_cots / codecontests, we additionally enrich each
 row with `tests={"inputs":[...], "outputs":[...]}` pulled from the
@@ -306,34 +311,35 @@ def main():
             else:
                 code_without_tests += 1
 
+        # Always include `tests` (None when absent) so every row has the
+        # same struct schema — pyarrow infers struct types from the first
+        # row and rejects later rows with extra keys.
         env_kwargs = {
             "question": question,
             "ground_truth": gold,
             "data_source": category,
             "source": source,
+            "tests": tests,
         }
-        if tests is not None:
-            env_kwargs["tests"] = tests
 
         extra_info = {
             "question": question,
             "gold": gold,
             "source": source,
             "category": category,
+            "tests": tests,
         }
-        if tests is not None:
-            extra_info["tests"] = tests
 
         rows.append({
-            "prompt": json.dumps([
+            "prompt": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Question: {question}\n\nOutput the trajectory now."},
-            ]),
+            ],
             "data_source": category,
             "ability": "routing",
-            "reward_model": json.dumps({"ground_truth": gold}),
-            "extra_info": json.dumps(extra_info),
-            "env_kwargs": json.dumps(env_kwargs),
+            "reward_model": {"ground_truth": gold},
+            "extra_info": extra_info,
+            "env_kwargs": env_kwargs,
         })
 
     print(f"[rl-pool] packed {len(rows)} rows, skipped {skipped}")

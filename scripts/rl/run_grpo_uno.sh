@@ -42,6 +42,16 @@ EXP_NAME="${EXP_NAME:-uno-orchestra-grpo}"
 PROJECT_NAME="${PROJECT_NAME:-uno-orchestra}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
+# Per-step rollout dump (chat completions + reward_extra_info as JSONL).
+# Default: dumped to a sibling of the ckpt dir. Pass ROLLOUT_DUMP_DIR=off
+# (or VAL_DUMP_DIR=off) to disable. JSONL contains: input prompt, decoded
+# completion, ground_truth, terminal score, plus every reward_extra_info
+# key (done_reason, env_n_route_calls, env_api_cost, env_correctness, ...).
+ROLLOUT_DUMP_DIR="${ROLLOUT_DUMP_DIR:-$PROJECT_DIR/checkpoints/uno-orchestra/$EXP_NAME/rollouts}"
+VAL_DUMP_DIR="${VAL_DUMP_DIR:-$PROJECT_DIR/checkpoints/uno-orchestra/$EXP_NAME/val_rollouts}"
+[[ "$ROLLOUT_DUMP_DIR" == "off" ]] && ROLLOUT_DUMP_DIR=""
+[[ "$VAL_DUMP_DIR"     == "off" ]] && VAL_DUMP_DIR=""
+
 # First-surface evidence: a fixed banner so any 0-byte / silent-exit log is
 # instantly distinguishable from a real failure deeper in verl. Print BEFORE
 # `set -x` echoes the python invocation so this stays at the top of the log.
@@ -82,6 +92,7 @@ set -x
     data.max_prompt_length=4096 \
     data.max_response_length=16384 \
     data.filter_overlong_prompts=True \
+    data.filter_overlong_prompts_workers=16 \
     data.truncation='error' \
     data.return_raw_chat=True \
     actor_rollout_ref.model.path="$MODEL_PATH" \
@@ -103,9 +114,10 @@ set -x
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.temperature=1.0 \
+    actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.multi_turn.enable=True \
-    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=5 \
+    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=8 \
     actor_rollout_ref.rollout.agent.agent_loop_config_path="$AGENTLOOP_CONFIG_PATH" \
     actor_rollout_ref.rollout.agent.default_agent_loop=uno \
     reward_manager.source=importlib \
@@ -122,4 +134,6 @@ set -x
     trainer.test_freq=20 \
     trainer.total_epochs=5 \
     trainer.val_before_train=False \
+    ${ROLLOUT_DUMP_DIR:+trainer.rollout_data_dir="$ROLLOUT_DUMP_DIR"} \
+    ${VAL_DUMP_DIR:+trainer.validation_data_dir="$VAL_DUMP_DIR"} \
     "$@"
