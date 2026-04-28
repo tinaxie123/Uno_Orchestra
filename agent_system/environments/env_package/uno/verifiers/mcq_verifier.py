@@ -63,9 +63,11 @@ def _extract_letter(s: str) -> str | None:
             return m.group(1).upper()
 
     # 2. Strongest intent marker — "answer is X", "the answer: X", etc.
-    m = _ANSWER_KEYWORD.search(s)
-    if m:
-        return m.group(1).upper()
+    # Use findall + rightmost so a model self-correction like
+    # "the answer is A. Actually the answer is B." resolves to B, not A.
+    keyword_hits = _ANSWER_KEYWORD.findall(s)
+    if keyword_hits:
+        return keyword_hits[-1].upper()
 
     # 3. Trailing single letter (model concluded with a bare letter)
     m = _TRAILING_LETTER.search(s)
