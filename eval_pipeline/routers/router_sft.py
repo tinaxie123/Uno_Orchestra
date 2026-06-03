@@ -5,25 +5,9 @@ Uses schema v1.1 with real API sub-agent calls (same as RL training env).
 import re
 import openai
 from .base import BaseRouter, RouteResult
-from ..config import (COST_PER_M, EVAL_MAX_TOKENS, SUB_AGENT_TEMP,
-                      DEFAULT_LOCAL_BASE, DEFAULT_API_BASE, SKILLS, resolve_model)
-
-# Skill → system prompt (same as envs.py SKILL_PROMPTS)
-SKILL_PROMPTS = {
-    "direct_answer": "Answer the following question directly and concisely.",
-    "reason": "Reason step by step about the following question, then give a final answer.",
-    "web_search": "You are a search engine. Return the most relevant factual information for the query.",
-    "symbolic_math": "You are a math solver. Compute the answer. Give only the numerical result.",
-    "execute_python": "You are a Python executor. Write and execute Python code to solve the following. Return the output.",
-    "execute_shell": "You are a shell executor. Run the command and return the output.",
-    "database_query": "You are a database. Return the queried information.",
-    "read_document": "You are a document reader. Extract the relevant information.",
-    "read_code": "You are a code analyst. Analyze the code and answer the question.",
-    "extract_field": "Extract the specific field or value requested.",
-    "parse_structured": "Parse the structured data and return the requested information.",
-    "fact_check": "Verify the following claim and state whether it is true or false with evidence.",
-    "call_api": "You are an API endpoint. Return the requested data.",
-}
+from ..config import DEFAULT_LOCAL_BASE, DEFAULT_API_BASE, compute_cost, resolve_model
+from agent_system.routing.uno.harness import build_default_harness
+from agent_system.routing.uno.primitives import Route
 
 # Regex parsers for schema v1.1
 ROUTE_RE = re.compile(
@@ -43,7 +27,11 @@ class UnoSFT(BaseRouter):
                  api_key="EMPTY", model_name="Uno-SFT",
                  max_rounds=3, system_prompt=None):
         self.local = openai.OpenAI(base_url=local_base, api_key="EMPTY")
-        self.api = openai.OpenAI(base_url=api_base, api_key=api_key)
+        self.harness = build_default_harness(
+            api_key=api_key,
+            base_url=api_base,
+            model_resolver=resolve_model,
+        )
         self.model_name = model_name
         self.max_rounds = max_rounds
         # Load system prompt
@@ -60,26 +48,25 @@ class UnoSFT(BaseRouter):
     def name(self):
         return "Uno-SFT"
 
-    def _call_sub_agent(self, model: str, skill: str, query: str, question: str):
-        """Call real API as sub-agent, same as envs.py."""
-        sys_prompt = SKILL_PROMPTS.get(skill, "Answer the following question concisely.")
-        actual_model = resolve_model(model)
+    def _call_sub_agent(
+        self,
+        round_n: int,
+        subtask_id: int,
+        model: str,
+        skill: str,
+        query: str,
+        question: str,
+    ):
+        """Dispatch through the same primitive pool used by the RL env."""
         try:
-            resp = self.api.chat.completions.create(
-                model=actual_model,
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": f"Original question: {question}\n\nSub-task: {query}\n\nAnswer directly."},
-                ],
-                max_tokens=EVAL_MAX_TOKENS,
-                temperature=SUB_AGENT_TEMP,
+            result = self.harness.run_route(
+                Route(round=round_n, subtask=subtask_id, model=model, skill=skill, query=query),
+                question,
             )
-            text = resp.choices[0].message.content or ""
-            tokens = getattr(resp.usage, "completion_tokens", 0) or 0
-            cost = COST_PER_M.get(model, 10.0) * max(tokens, 1) / 1e6
-            return text, tokens, cost
+            cost = compute_cost(model, result.output_tokens) if result.billable else 0.0
+            return result.text, result.output_tokens, cost, result.backend
         except Exception as e:
-            return f"API error: {str(e)[:200]}", 0, 0.0
+            return f"API error: {str(e)[:200]}", 0, 0.0, "harness_error"
 
     def route(self, question: str, context: dict = None) -> RouteResult:
         messages = [
@@ -87,7 +74,7 @@ class UnoSFT(BaseRouter):
             {"role": "user", "content": question},
         ]
         full_trace = ""
-        all_models, all_skills = [], []
+        all_models, all_skills, all_backends = [], [], []
         total_cost, total_tokens, route_count = 0.0, 0, 0
 
         for round_idx in range(self.max_rounds):
@@ -120,9 +107,17 @@ class UnoSFT(BaseRouter):
             obs_parts = []
             for round_n, subtask_id, model, skill, query in routes:
                 route_count += 1
-                text, tokens, cost = self._call_sub_agent(model, skill, query, question)
+                text, tokens, cost, backend = self._call_sub_agent(
+                    int(round_n),
+                    int(subtask_id),
+                    model,
+                    skill,
+                    query,
+                    question,
+                )
                 all_models.append(model)
                 all_skills.append(skill)
+                all_backends.append(backend)
                 total_tokens += tokens
                 total_cost += cost
                 obs_parts.append(f'<obs subtask="{subtask_id}">{text}</obs>')
@@ -145,6 +140,7 @@ class UnoSFT(BaseRouter):
             route_count=route_count,
             routed_models=all_models,
             routed_skills=all_skills,
+            routed_backends=all_backends,
             total_cost=total_cost,
             total_tokens=total_tokens,
         )

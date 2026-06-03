@@ -15,6 +15,7 @@ class RouteResult:
     route_count: int = 0
     routed_models: List[str] = field(default_factory=list)
     routed_skills: List[str] = field(default_factory=list)
+    routed_backends: List[str] = field(default_factory=list)
     total_cost: float = 0.0
     total_tokens: int = 0
 

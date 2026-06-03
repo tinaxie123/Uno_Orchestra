@@ -11,16 +11,15 @@ Each episode:
 Reward: R = (1-α)·R_outcome + α·R_cost (outcome ∈ {0,1}, R_cost from
 rolling-percentile winsorisation of sqrt-transformed API cost)
 
-Sub-agent: real API calls to qwen-plus via DashScope.
-Every route gets a real LLM response regardless of skill choice.
-The model must learn which (model, skill) combination actually works.
+Sub-agent: routes are dispatched through the closed primitive pool in
+primitives.py. Some primitives use bounded local backends, others call the
+routed worker model with a primitive-specific prompt.
 """
 
 import logging
 import re
 import string
 import concurrent.futures
-import os
 from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
@@ -29,10 +28,12 @@ import gym
 import numpy as np
 from omegaconf import DictConfig
 
-try:
-    import openai
-except ImportError:
-    openai = None
+from agent_system.routing.uno.harness import (
+    RouteValidationError,
+    build_default_harness,
+    load_harness_config,
+)
+from agent_system.routing.uno.primitives import Route
 
 
 # --- Schema v1.1 Parsers ---
@@ -48,18 +49,10 @@ ROUTE_RE = re.compile(
 FINAL_RE = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
 
 # Valid pools
-VALID_MODELS = {
-    "claude-sonnet-4-6", "claude-opus-4-6",
-    "gpt-5.4", "gpt-5.3-codex",
-    "gemini-3-flash-preview",
-    "gemini-2.5-flash", "gemini-2.5-flash-lite",
-    "kimi-k2.5",
-}
-VALID_SKILLS = {
-    "direct_answer", "reason", "web_search", "database_query", "read_document",
-    "read_code", "extract_field", "parse_structured", "symbolic_math",
-    "execute_python", "execute_shell", "fact_check", "call_api",
-}
+_HARNESS_CONFIG = load_harness_config()
+VALID_MODELS = set(_HARNESS_CONFIG.valid_models)
+VALID_SKILLS = set(_HARNESS_CONFIG.valid_skills)
+MODEL_SKILLS = {model: set(skills) for model, skills in _HARNESS_CONFIG.model_skills.items()}
 
 # Sources where a "lazy" direct-answer (no <plan>/<route>) is legitimate
 # — atomic reasoning / single-hop knowledge questions the router should
@@ -76,17 +69,8 @@ LAZY_ALLOWED_SOURCES = {
 }
 
 # Per-token cost (USD per 1M output tokens)
-MODEL_COST_PER_M_TOKENS = {
-    # output price USD per 1M tokens (from configs/pools.yaml)
-    "gemini-2.5-flash-lite": 0.40,
-    "gemini-2.5-flash": 2.50,
-    "kimi-k2.5": 3.00,
-    "gemini-3-flash-preview": 3.00,
-    "gpt-5.3-codex": 14.00,
-    "gpt-5.4": 15.00,
-    "claude-sonnet-4-6": 15.00,
-    "claude-opus-4-6": 25.00,
-}
+MODEL_COST_PER_M_TOKENS = dict(_HARNESS_CONFIG.cost_per_m_tokens)
+_DEFAULT_HARNESS = build_default_harness()
 # ── Rolling-percentile cost normalisation ───────────────────────────
 # Cost normalisation without a hand-tuned budget cap. Raw USD cost is
 # sqrt-transformed first (compressing the ~100× dynamic range between
@@ -121,170 +105,6 @@ def _rolling_percentile_cost_reward(raw_cost: float) -> float:
     if denom < _COST_EPS:
         return 0.5
     return 1.0 - float(np.clip((r - r_min) / denom, 0.0, 1.0))
-
-# Skill → system prompt for sub-agent
-SKILL_PROMPTS = {
-    "direct_answer": "Answer the following question directly and concisely.",
-    "reason": "Reason step by step about the following question, then give a final answer.",
-    "web_search": "You are a search engine. Return the most relevant factual information for the query.",
-    "symbolic_math": "You are a math solver. Compute the answer to the following math problem. Give only the numerical result.",
-    "execute_python": "You are a Python executor. Write and execute Python code to solve the following. Return the output.",
-    "database_query": "You are a database. Return the queried information.",
-    "read_document": "You are a document reader. Extract the relevant information from the document.",
-    "read_code": "You are a code analyst. Analyze the code and answer the question.",
-    "extract_field": "Extract the specific field or value requested.",
-    "parse_structured": "Parse the structured data and return the requested information.",
-    "fact_check": "Verify the following claim and state whether it is true or false with evidence.",
-    "call_api": "You are an API endpoint. Return the requested data.",
-    "execute_shell": "You are a shell executor. Run the command and return the output.",
-}
-
-
-# Output-token budget per model tier. xiaojingai proxies every model in
-# VALID_MODELS directly, so we no longer synthesize weaker models via
-# qwen-plus/qwen-max — the router pays the real price (MODEL_COST_PER_M_TOKENS
-# below) and sees real capability differences. max_tokens is kept modest
-# so one RL rollout doesn't blow the budget cap.
-_MODEL_MAX_TOKENS = {
-    # lightweight tier (cheapest, short answers)
-    "gemini-2.5-flash-lite": 256,
-    "gemini-2.5-flash": 256,
-    # mid tier
-    "kimi-k2.5": 512,
-    "gemini-3-flash-preview": 512,
-    "claude-sonnet-4-6": 512,
-    # frontier tier
-    "claude-opus-4-6": 768,
-    "gpt-5.4": 768,
-    # code specialist
-    "gpt-5.3-codex": 1024,
-}
-_DEFAULT_MAX_TOKENS = 256
-
-
-def _get_api_client():
-    """OpenAI-compatible client for the worker pool.
-
-    Credentials come exclusively from the environment — no default key is
-    baked into the source so that a forgotten `export` can never silently
-    fall back to a leaked credential. `REMOTE_API_BASE` has a public
-    default because the endpoint URL is not sensitive.
-    """
-    api_key = os.environ.get("REMOTE_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "REMOTE_API_KEY is not set. Export it in the shell env before "
-            "running anything that touches the worker pool."
-        )
-    base_url = os.environ.get(
-        "REMOTE_API_BASE",
-        "https://open.xiaojingai.com/v1/",
-    )
-    # Cap per-call latency so a single hung worker can't deadlock the whole
-    # rollout's asyncio.gather. Default openai-python timeout is 600s + 2
-    # auto-retries (~30 min worst case) — that masks as a "step 2 hang" in
-    # GRPO. 60s + 1 retry caps a single sub-agent call at ~120s.
-    return openai.OpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        timeout=60.0,
-        max_retries=1,
-    )
-
-
-def call_sub_agent_api(model: str, skill: str, query: str, question: str) -> Tuple[str, int]:
-    """Call the routed worker model via xiaojingai and return (text, out_tokens).
-
-    The router's own choice of `model` is sent verbatim (no tier remap),
-    so the routed model really runs — cost and quality
-    differences are authentic. Skill picks the worker's system prompt;
-    the user turn carries the original task question (for context) plus
-    the planner's specific subtask query.
-    """
-    client = _get_api_client()
-    sys_prompt = SKILL_PROMPTS.get(skill, "Answer the following question concisely.")
-    max_tok = _MODEL_MAX_TOKENS.get(model, _DEFAULT_MAX_TOKENS)
-
-    user_content = (
-        f"Original question: {question}\n\nSub-task: {query}\n\nAnswer directly, no chain of thought."
-        if question
-        else f"Sub-task: {query}\n\nAnswer directly, no chain of thought."
-    )
-
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=max_tok,
-            temperature=0.3,
-        )
-        text = resp.choices[0].message.content.strip()
-        output_tokens = resp.usage.completion_tokens
-        return text, output_tokens
-    except Exception as e:
-        return f"API error: {str(e)[:200]}", 0
-
-
-# Hard wall-clock timeout for a single sub-agent call. The OpenAI sync
-# client is configured with timeout=60s + max_retries=1, so a healthy
-# call should top out around ~120s. We give a small margin (150s) and
-# treat anything beyond as a silent hang (already-observed failure mode:
-# step 4 of verify_10step_fix_20260427_213203 stalled >10 min with all
-# GPUs idle and no exception ever raised by the SDK — see
-# project_format_gate_false_positive memory and _hang_evidence/).
-_SUBAGENT_HARD_TIMEOUT_SEC = float(os.environ.get("UNO_SUBAGENT_HARD_TIMEOUT_SEC", "150"))
-# Sized for the rollout concurrency (verl agent loop runs ~8 worker
-# processes × tens of concurrent env.step threads). When a wrapped
-# call hangs at the HTTP layer the underlying thread is leaked until
-# the OS-level TCP timeout fires; with a generous pool the leak is
-# absorbed for a 10-step verify and beyond.
-_SUBAGENT_TIMEOUT_POOL = concurrent.futures.ThreadPoolExecutor(
-    max_workers=int(os.environ.get("UNO_SUBAGENT_TIMEOUT_POOL_SIZE", "256")),
-    thread_name_prefix="uno-subagent-timeout",
-)
-
-
-def call_sub_agent_api_with_hard_timeout(
-    model: str, skill: str, query: str, question: str
-) -> Tuple[str, int, bool]:
-    """Wrap call_sub_agent_api with an outer wall-clock timeout.
-
-    Returns (text, output_tokens, hard_timed_out). On hard-timeout we
-    log a WARNING (so frequency is observable in the agent loop log)
-    and return a sentinel obs string with 0 tokens. The caller must
-    treat hard_timed_out=True as a fatal-for-this-rollout signal:
-    terminate the episode, surface metadata["timeout"]=True so the
-    rollout's done_reason becomes "timeout" and env_terminal_reward
-    becomes 0 via the standard terminal-reward path.
-
-    The wrapped openai SDK call still runs in the background after we
-    return — that thread is leaked until the OS-level TCP timeout
-    eventually fires. This is intentional: the alternative (blocking
-    on the call until it finishes) is exactly the deadlock we're
-    fixing. The pool is sized generously to absorb the rare leak.
-    """
-    fut = _SUBAGENT_TIMEOUT_POOL.submit(
-        call_sub_agent_api, model, skill, query, question
-    )
-    try:
-        text, output_tokens = fut.result(timeout=_SUBAGENT_HARD_TIMEOUT_SEC)
-        return text, output_tokens, False
-    except concurrent.futures.TimeoutError:
-        logger.warning(
-            "uno sub-agent hard timeout after %.1fs (model=%s skill=%s "
-            "query=%r) — terminating rollout with done_reason=timeout. "
-            "Underlying thread leaked, will reap when TCP timeout fires.",
-            _SUBAGENT_HARD_TIMEOUT_SEC, model, skill, query[:80],
-        )
-        return (
-            f"<error reason=\"sub_agent_hard_timeout\" after_s=\"{_SUBAGENT_HARD_TIMEOUT_SEC}\"/>",
-            0,
-            True,
-        )
-
 
 from agent_system.environments.env_package.uno.verifiers import verify as _verify_by_source
 
@@ -322,6 +142,7 @@ class SingleUnoEnv:
         self.total_output_tokens = 0
         self.done = False
         self.final_answer = None
+        self.harness = _DEFAULT_HARNESS
 
     def reset(self, extras: Dict):
         self.question = extras["question"]
@@ -422,20 +243,35 @@ class SingleUnoEnv:
                 "metadata": metadata,
             }
 
-        # Parse routes and call real API
+        # Parse routes and dispatch through the route harness.
         routes = ROUTE_RE.findall(action)
         if routes:
             obs_parts = []
+            primitive_backends = []
             for round_n, subtask_id, model, skill, query in routes:
-                # Call real API with an outer hard wall-clock timeout.
-                # On silent SDK hang we terminate THIS rollout immediately
-                # rather than blocking the whole batch's asyncio.gather.
-                response_text, output_tokens, hard_timed_out = \
-                    call_sub_agent_api_with_hard_timeout(
-                        model, skill, query, self.question
+                route = Route(
+                    round=int(round_n),
+                    subtask=int(subtask_id),
+                    model=model,
+                    skill=skill,
+                    query=query,
+                )
+                try:
+                    primitive_result = self.harness.run_route(route, self.question)
+                except RouteValidationError as exc:
+                    route_error = str(exc)
+                    obs_parts.append(
+                        f'<obs subtask="{subtask_id}"><error reason="invalid_route">{route_error}</error></obs>'
                     )
+                    self.done = True
+                    reward = 0.0
+                    metadata["format_error"] = True
+                    metadata["invalid_route"] = route_error
+                    break
+                response_text = primitive_result.text
+                primitive_backends.append(primitive_result.backend)
 
-                if hard_timed_out:
+                if primitive_result.timed_out:
                     obs_parts.append(
                         f'<obs subtask="{subtask_id}">{response_text}</obs>'
                     )
@@ -445,15 +281,18 @@ class SingleUnoEnv:
                     metadata["api_hard_timeout"] = True
                     break
 
-                self.total_output_tokens += output_tokens
+                self.total_output_tokens += primitive_result.output_tokens
 
-                # Compute cost using the ROUTED model's pricing (not qwen-plus actual cost)
-                # This is the cost the Router "would have paid" if using the real model
-                cost_per_m = MODEL_COST_PER_M_TOKENS.get(model, 10.0)
-                self.total_api_cost += cost_per_m * max(output_tokens, 1) / 1e6
+                if primitive_result.billable:
+                    # Compute cost using the ROUTED model's pricing.
+                    cost_per_m = MODEL_COST_PER_M_TOKENS.get(model, 10.0)
+                    self.total_api_cost += (
+                        cost_per_m * max(primitive_result.output_tokens, 1) / 1e6
+                    )
 
                 obs_parts.append(f'<obs subtask="{subtask_id}">{response_text}</obs>')
             observations = [{"content": "\n".join(obs_parts)}]
+            metadata["primitive_backends"] = primitive_backends
 
         # Max turns exceeded
         if self.current_round >= self.max_turns:
@@ -473,7 +312,7 @@ class SingleUnoEnv:
 
 
 class UnoMultiProcessEnv(gym.Env):
-    """Vectorized UNO environment with real API calls."""
+    """Vectorized UNO environment with harness-backed primitive dispatch."""
 
     def __init__(
         self,
@@ -492,7 +331,7 @@ class UnoMultiProcessEnv(gym.Env):
         self.alpha = env_config.get("alpha", 0.1) if env_config else 0.1
 
         self.envs = [SingleUnoEnv() for _ in range(self.batch_size)]
-        # More workers for parallel API calls
+        # More workers for parallel environment steps.
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.batch_size, 128)
         )

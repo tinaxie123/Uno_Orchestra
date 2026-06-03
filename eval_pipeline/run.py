@@ -154,9 +154,12 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
     verified = len(verification)
     total_cost = sum(p.get("cost", 0) for p in predictions.values())
     model_usage = {}
+    backend_usage = {}
     for p in predictions.values():
         for m in p.get("routed_models", []):
             model_usage[m] = model_usage.get(m, 0) + 1
+        for b in p.get("routed_backends", []):
+            backend_usage[b] = backend_usage.get(b, 0) + 1
 
     # Compute pass@k from stored per-attempt rewards
     pass_at = {}
@@ -176,6 +179,7 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
         "avg_cost": round(total_cost / max(total, 1), 6),
         "avg_routes": round(sum(p.get("route_count", 0) for p in predictions.values()) / max(total, 1), 2),
         "model_usage": model_usage,
+        "backend_usage": backend_usage,
     }
     with open(out / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
@@ -184,6 +188,8 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
     print(f"RESULTS — {router.name} on {bench.name}")
     print(f"  Pass@1: {pass_at.get(1,0)*100:.1f}%  Pass@3: {pass_at.get(3,0)*100:.1f}%  ({passed}/{verified})")
     print(f"  Cost: ${total_cost:.4f} (${total_cost/max(total,1):.6f}/task)")
+    if backend_usage:
+        print(f"  Backends: {backend_usage}")
     print(f"  Output: {out}")
     print(f"{'='*60}")
     return summary
@@ -429,6 +435,7 @@ def _gen_one(router, bench, task):
         "task_id": task.task_id, "answer": answer,
         "full_trace": res.full_trace, "route_count": res.route_count,
         "routed_models": res.routed_models, "routed_skills": res.routed_skills,
+        "routed_backends": res.routed_backends,
         "cost": res.total_cost, "tokens": res.total_tokens,
     }
 
