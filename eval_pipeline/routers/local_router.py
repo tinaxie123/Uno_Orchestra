@@ -6,7 +6,7 @@ Flow: <think> → <search>Model:Query</search> → <information> → <answer>
 import re
 import openai
 from .base import BaseRouter, RouteResult
-from ..config import COST_PER_M, EVAL_MAX_TOKENS, SUB_AGENT_TEMP, DEFAULT_LOCAL_BASE, DEFAULT_API_BASE
+from ..config import EVAL_MAX_TOKENS, SUB_AGENT_TEMP, DEFAULT_LOCAL_BASE, DEFAULT_API_BASE, compute_cost
 
 ROUTER_PROMPT = """\
 Answer the given question. \
@@ -82,7 +82,7 @@ class LocalRouter(BaseRouter):
         prompt = ROUTER_PROMPT.format(question=question)
         msgs = [{"role": "user", "content": prompt}]
         output = ""
-        routes, models, cost, toks = 0, [], 0.0, 0
+        routes, models, cost, toks, prompt_toks = 0, [], 0.0, 0, 0
 
         for _ in range(self.max_turns + 1):
             try:
@@ -117,13 +117,15 @@ class LocalRouter(BaseRouter):
                         )
                         txt = sr.choices[0].message.content or ""
                         t = getattr(sr.usage, "completion_tokens", 0) or 0
+                        pt = getattr(sr.usage, "prompt_tokens", 0) or 0
                     except Exception as e:
-                        txt, t = f"API Error: {e}", 0
+                        txt, t, pt = f"API Error: {e}", 0, 0
 
                     routes += 1
                     models.append(mid)
                     toks += t
-                    cost += COST_PER_M.get(mid, 10.0) * max(t, 1) / 1e6
+                    prompt_toks += pt
+                    cost += compute_cost(mid, t, pt)
                     output += o + f"\n<information>{txt}</information>\n"
                     msgs = [{"role": "user", "content": prompt + output}]
                 else:
@@ -137,5 +139,6 @@ class LocalRouter(BaseRouter):
         return RouteResult(
             answer=ans_m.group(1).strip() if ans_m else output,
             full_trace=output, route_count=routes,
-            routed_models=models, total_cost=cost, total_tokens=toks,
+            routed_models=models, total_cost=cost, total_tokens=toks + prompt_toks,
+            prompt_tokens=prompt_toks, completion_tokens=toks,
         )

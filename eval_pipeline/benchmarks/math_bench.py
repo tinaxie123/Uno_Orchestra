@@ -12,9 +12,9 @@ import os
 from typing import List
 from .base import BaseBenchmark, Task, VerifyResult
 
-# Reuse project's math verifier
+# Reuse the Uno verifier used by the RL environment.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from scripts.data.verifiers.math_verifier import verify_math
+from env.env_package.uno.verifiers.math_verifier import verify_math
 
 
 def _extract_boxed(text: str) -> str:

@@ -6,7 +6,7 @@ Two levels of agents, both our own code:
   Planner (``router.chat_completions``)
     → decides ``delegate_task(worker_model, instruction)`` or ``submit(reason)``
 
-  SubAgent (``agent_system.agents.subagent.SubAgent``)
+  SubAgent (``uno_orchestor.agents.subagent.SubAgent``)
     → runs multi-turn shell commands inside the Docker container,
       observes output, reports a structured status back to the Planner
 
@@ -38,7 +38,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-HARBOR_TASKS_DIR = "/home/xieht/.cache/harbor/tasks/packages/terminal-bench"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+HARBOR_TASKS_DIR = os.environ.get(
+    "TERMINAL_BENCH_TASKS_DIR",
+    str(_REPO_ROOT / "data" / "terminal-bench" / "tasks"),
+)
 COMPOSE_YAML = (
     Path(__file__).parent.parent / "executors" / "docker-compose-build.yaml"
 )
@@ -195,6 +199,8 @@ def _budget_note(attempt_idx: int, max_attempts: int) -> str:
 
 
 class TerminalBench(BaseBenchmark):
+    scoring_mode = "uno_harness"
+    score_name = "Uno harness score"
 
     def __init__(
         self,
@@ -263,6 +269,21 @@ class TerminalBench(BaseBenchmark):
             "TerminalBench is interactive; use run_interactive(task, router, ...)"
         )
 
+    def interactive_verify(self, task: Task, router, logs_dir=None) -> VerifyResult:
+        """Adapter used by eval_pipeline.run's common interactive path."""
+        from ..config import DEFAULT_API_BASE, MODEL_POOL
+
+        flat_mode = router.name.startswith("Direct(")
+        return self.run_interactive(
+            task=task,
+            router=router,
+            worker_pool=MODEL_POOL,
+            subagent_api_base=getattr(router, "sub_model_api_base", DEFAULT_API_BASE),
+            subagent_api_key=getattr(router, "sub_model_api_key", "EMPTY"),
+            logs_dir=logs_dir,
+            flat_mode=flat_mode,
+        )
+
     # ----- main interactive pipeline -----------------------------------
 
     # ------------------------------------------------------------------
@@ -329,11 +350,16 @@ class TerminalBench(BaseBenchmark):
     ) -> VerifyResult:
         import random as _random
         from openai import AsyncOpenAI
+        return VerifyResult(
+            task.task_id,
+            0.0,
+            error=(
+                "legacy run_hierarchical depended on deleted planner/router modules; "
+                "use interactive_verify/run_interactive for reproducible evaluation"
+            ),
+        )
         from ..executors import DockerExecutor
-        # Import lazily so the module is usable without LangChain installed.
-        from scripts.data.planner import arun_planner
-        from scripts.data.router import aroute_subtask
-        from agent_system.agents.subagent import SubAgent
+        from uno_orchestor.agents.subagent import SubAgent
 
         cfg = task.raw.get("config", {})
         task_dir = Path(task.raw.get("task_dir", ""))
@@ -516,7 +542,7 @@ class TerminalBench(BaseBenchmark):
         logs_dir: Optional[str],
     ) -> VerifyResult:
         from ..executors import DockerExecutor
-        from agent_system.agents.subagent import SubAgent
+        from uno_orchestor.agents.subagent import SubAgent
 
         cfg = task.raw.get("config", {})
         task_dir = Path(task.raw.get("task_dir", ""))

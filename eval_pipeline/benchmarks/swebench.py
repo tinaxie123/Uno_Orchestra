@@ -1,11 +1,8 @@
-"""
-SWE-bench Verified benchmark adapter.
+"""SWE-bench Verified benchmark adapter.
 
-Two modes:
-1. Interactive: router ↔ Docker multi-turn → extract patch → official swebench harness verify
-2. One-shot: router generates patch blindly → official swebench harness verify (fallback)
-
-Verification always uses the official swebench harness (never self-parsed).
+Two complete scoring modes:
+1. Interactive: router ↔ Docker multi-turn → Uno harness score
+2. One-shot: router generates a patch → official-compatible harness score
 """
 import re
 import os

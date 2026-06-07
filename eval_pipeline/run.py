@@ -138,6 +138,11 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
         _run_interactive(router, bench, tasks, need_verify,
                          predictions, verification, pred_file, verify_file,
                          logs_dir, args)
+    elif getattr(args, "pass_k", 1) > 1 and not args.skip_gen and not args.skip_verify:
+        _run_attempted_noninteractive(
+            router, bench, tasks, predictions, verification,
+            pred_file, verify_file, logs_dir, args,
+        )
     elif bench.name == "SWE-bench_Verified" and not args.interactive:
         _run_sequential(router, bench, tasks, need_gen, need_verify,
                         predictions, verification, pred_file, verify_file,
@@ -163,20 +168,32 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
 
     # Compute pass@k from stored per-attempt rewards
     pass_at = {}
-    for k in [1, 3]:
+    for k in [1, 2]:
         count = 0
         for v in verification.values():
             attempts = v.get("pass_at_k", [v.get("reward", 0)])
             count += int(any(r > 0 for r in attempts[:k]))
         pass_at[k] = round(count / max(verified, 1), 4)
 
+    total_tokens = sum(p.get("tokens", 0) for p in predictions.values())
+    prompt_tokens = sum(p.get("prompt_tokens", 0) for p in predictions.values())
+    completion_tokens = sum(p.get("completion_tokens", 0) for p in predictions.values())
+
+    scoring_mode, score_name = _resolve_scoring_mode(bench, args)
     summary = {
         "router": router.name, "benchmark": bench.name,
+        "scoring_mode": scoring_mode,
+        "score_name": score_name,
         "total": total, "verified": verified, "passed": passed,
-        "pass_at_1": pass_at.get(1, 0), "pass_at_3": pass_at.get(3, 0),
+        "pass_at_1": pass_at.get(1, 0), "pass_at_2": pass_at.get(2, 0),
         "passed_ids": [tid for tid, v in verification.items() if v.get("reward", 0) > 0],
         "total_cost_usd": round(total_cost, 4),
         "avg_cost": round(total_cost / max(total, 1), 6),
+        "avg_cost_usd_per_query": round(total_cost / max(total, 1), 6),
+        "total_tokens": total_tokens,
+        "avg_tokens": round(total_tokens / max(total, 1), 2),
+        "avg_context_tokens": round(prompt_tokens / max(total, 1), 2),
+        "avg_output_tokens": round(completion_tokens / max(total, 1), 2),
         "avg_routes": round(sum(p.get("route_count", 0) for p in predictions.values()) / max(total, 1), 2),
         "model_usage": model_usage,
         "backend_usage": backend_usage,
@@ -186,13 +203,98 @@ def run_pipeline(router: BaseRouter, bench: BaseBenchmark, args):
 
     print(f"\n{'='*60}")
     print(f"RESULTS — {router.name} on {bench.name}")
-    print(f"  Pass@1: {pass_at.get(1,0)*100:.1f}%  Pass@3: {pass_at.get(3,0)*100:.1f}%  ({passed}/{verified})")
+    print(f"  Score: {score_name} ({scoring_mode})")
+    print(f"  Pass@1: {pass_at.get(1,0)*100:.1f}%  Pass@2: {pass_at.get(2,0)*100:.1f}%  ({passed}/{verified})")
     print(f"  Cost: ${total_cost:.4f} (${total_cost/max(total,1):.6f}/task)")
     if backend_usage:
         print(f"  Backends: {backend_usage}")
     print(f"  Output: {out}")
     print(f"{'='*60}")
     return summary
+
+
+def _resolve_scoring_mode(bench: BaseBenchmark, args) -> tuple[str, str]:
+    if bench.name == "SWE-bench_Verified" and getattr(args, "interactive", False):
+        return "uno_harness", "Uno harness score"
+    return (
+        getattr(bench, "scoring_mode", "official_compatible"),
+        getattr(bench, "score_name", "Official-compatible score"),
+    )
+
+
+def _run_attempted_noninteractive(router, bench, tasks, predictions, verification,
+                                  pred_file, verify_file, logs_dir, args):
+    """Run pass@k for ordinary generate-then-verify benchmarks.
+
+    Each task owns one prediction row with an ``attempts`` list. Cost and token
+    fields are the sum of attempts actually run, including early stop on pass.
+    """
+    pass_k = getattr(args, "pass_k", 2)
+    to_run = [t for t in tasks if t.task_id not in verification]
+    if not to_run:
+        print("Attempted eval: all tasks already verified")
+        return
+
+    print(f"Attempted non-interactive mode: {len(to_run)} tasks, pass@{pass_k}")
+    lock = threading.Lock()
+    with open(pred_file, "a") as pout, open(verify_file, "a") as vout:
+        def _one(task):
+            rewards = []
+            attempt_entries = []
+            last_vr = None
+            for attempt in range(pass_k):
+                entry = _gen_one(router, bench, task)
+                attempt_logs = os.path.join(logs_dir, f"attempt_{attempt}") if pass_k > 1 else logs_dir
+                vr = bench.verify(task, entry["answer"], attempt_logs)
+                rewards.append(vr.reward)
+                last_vr = vr
+                attempt_entries.append(entry)
+                if vr.reward > 0:
+                    break
+            return task, max(rewards), rewards, last_vr, attempt_entries
+
+        with ThreadPoolExecutor(max_workers=args.verify_workers) as ex:
+            futs = {ex.submit(_one, t): t for t in to_run}
+            for fut in tqdm(as_completed(futs), total=len(to_run), desc=f"pass@{pass_k}"):
+                task, best_reward, rewards, last_vr, attempts = fut.result()
+                pred_entry = _merge_attempt_entries(task.task_id, attempts)
+                ver_entry = {
+                    "task_id": task.task_id,
+                    "reward": best_reward,
+                    "pass_at_k": rewards,
+                    "error": last_vr.error if last_vr else None,
+                    "log": (last_vr.log if last_vr else "")[:500],
+                }
+                with lock:
+                    predictions[task.task_id] = pred_entry
+                    verification[task.task_id] = ver_entry
+                    pout.write(json.dumps(pred_entry) + "\n")
+                    vout.write(json.dumps(ver_entry) + "\n")
+                    pout.flush()
+                    vout.flush()
+
+
+def _merge_attempt_entries(task_id: str, attempts: list[dict]) -> dict:
+    def _chain(key):
+        out = []
+        for attempt in attempts:
+            out.extend(attempt.get(key, []) or [])
+        return out
+
+    return {
+        "task_id": task_id,
+        "answer": attempts[-1].get("answer", "") if attempts else "",
+        "attempts": attempts,
+        "full_trace": attempts[-1].get("full_trace", "") if attempts else "",
+        "route_count": sum(a.get("route_count", 0) for a in attempts),
+        "routed_models": _chain("routed_models"),
+        "routed_skills": _chain("routed_skills"),
+        "routed_backends": _chain("routed_backends"),
+        "cost": sum(a.get("cost", 0) for a in attempts),
+        "tokens": sum(a.get("tokens", 0) for a in attempts),
+        "prompt_tokens": sum(a.get("prompt_tokens", 0) for a in attempts),
+        "completion_tokens": sum(a.get("completion_tokens", 0) for a in attempts),
+    }
 
 
 def _run_interactive(router, bench, tasks, need_verify,
@@ -230,7 +332,8 @@ def _run_interactive(router, bench, tasks, need_verify,
                      "pass_at_k": rewards,
                      "error": last_vr.error, "log": last_vr.log[:500]}
                 pred_entry = {"task_id": task.task_id, "answer": "(interactive)",
-                              "route_count": 0, "routed_models": [], "cost": 0}
+                              "route_count": 0, "routed_models": [], "cost": 0,
+                              "tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
                 with lock:
                     verification[task.task_id] = d
                     vout.write(json.dumps(d) + "\n")
@@ -287,7 +390,8 @@ def _run_pipeline_eval(bench, tasks, need_verify,
                      "pass_at_k": rewards,
                      "error": vr.error, "log": vr.log[:500]}
                 pred_entry = {"task_id": vr.task_id, "answer": "(pipeline)",
-                              "route_count": 0, "routed_models": [], "cost": 0}
+                              "route_count": 0, "routed_models": [], "cost": 0,
+                              "tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
                 with lock:
                     verification[vr.task_id] = d
                     vout.write(json.dumps(d) + "\n")
@@ -437,6 +541,8 @@ def _gen_one(router, bench, task):
         "routed_models": res.routed_models, "routed_skills": res.routed_skills,
         "routed_backends": res.routed_backends,
         "cost": res.total_cost, "tokens": res.total_tokens,
+        "prompt_tokens": res.prompt_tokens,
+        "completion_tokens": res.completion_tokens,
     }
 
 def main():

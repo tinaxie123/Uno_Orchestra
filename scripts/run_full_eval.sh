@@ -12,15 +12,22 @@ set -euo pipefail
 
 # ── Configuration ──
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-EVAL_OUT="${PROJECT_DIR}/data/eval"
+if [[ -f "${PROJECT_DIR}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${PROJECT_DIR}/.env"
+    set +a
+fi
+EVAL_OUT="${EVAL_OUT:-${PROJECT_DIR}/data/eval}"
 API_KEY="${API_KEY:-EMPTY}"
 API_BASE="${API_BASE:-http://localhost:9000/v1}"      # API model gateway (9-model pool)
 LOCAL_BASE="${LOCAL_BASE:-http://localhost:8000/v1}"   # vLLM local model (planner/router)
 GEN_WORKERS="${GEN_WORKERS:-8}"
 VERIFY_WORKERS="${VERIFY_WORKERS:-4}"
+PASS_K="${PASS_K:-2}"
 
-# ── Benchmarks (skip SWE-bench & Terminal-Bench) ──
-ALL_BENCHMARKS=(gpqa mmlu math500 aime drop humaneval mbpp gaia livecodebench toolbench mrcr)
+# ── Paper benchmark suite (13 benchmarks) ──
+ALL_BENCHMARKS=(gpqa mmlu math500 aime drop humaneval mbpp gaia livecodebench toolbench mrcr swebench terminalbench)
 
 # ── Models to evaluate ──
 # Format: "NAME|ROUTER_TYPE|LOCAL_MODEL|EXTRA_ARGS"
@@ -28,7 +35,7 @@ ALL_BENCHMARKS=(gpqa mmlu math500 aime drop humaneval mbpp gaia livecodebench to
 # ROUTER_TYPE:
 #   direct  = model answers directly, no routing (baseline)
 #   random  = randomly pick from model pool (baseline)
-#   planner = full Planner→Router→Worker pipeline (our framework)
+#   planner = paper-style unified Uno policy router (schema + route harness)
 #
 MODELS=(
     # ━━━ Direct baselines (model answers directly, no decomposition/routing) ━━━
@@ -39,12 +46,12 @@ MODELS=(
     "RouterRL_Qwen25-7B_Random|random|Qwen/Qwen2.5-7B-Instruct|"
     "RouterRL_Qwen3-4B_Random|random|Qwen/Qwen3-4B|"
 
-    # ━━━ Full Planner→Router→Worker (our framework, full model pool) ━━━
+    # ━━━ Full Uno-Orchestra policy router (full model/skill pool) ━━━
     "RouterRL_Qwen25-7B_Plus|planner|Qwen/Qwen2.5-7B-Instruct|"
     "RouterRL_Qwen3-4B_Plus|planner|Qwen/Qwen3-4B|"
 
     # ━━━ Full framework + claude-heavy pool ━━━
-    # TODO: implement pool ablation flag in PlannerRouter
+    # TODO: implement pool ablation flag in Uno router
     # "RouterRL_Qwen25-7B_Claude|planner|Qwen/Qwen2.5-7B-Instruct|"
     # "RouterRL_Qwen3-4B_Claude|planner|Qwen/Qwen3-4B|"
 
@@ -88,7 +95,11 @@ echo ""
 echo "  Pipeline:"
 echo "    direct  → model answers question directly"
 echo "    random  → randomly route to API model pool"
-echo "    planner → Planner(plan_subtask) → Router(model,skill) → Worker API"
+echo "    planner → Uno policy emits <route model skill> → Worker API/harness"
+echo ""
+echo "  Scoring:"
+echo "    official_compatible → benchmark-standard verifier flow"
+echo "    uno_harness         → multi-turn Uno harness score"
 echo "════════════════════════════════════════════════════════════"
 
 TOTAL=0
@@ -100,6 +111,10 @@ for model_spec in "${MODELS[@]}"; do
     for BENCH in "${SELECTED_BENCHMARKS[@]}"; do
         TOTAL=$((TOTAL + 1))
         OUT_DIR="${EVAL_OUT}/${MODEL_NAME}/${BENCH}"
+        BENCH_EXTRA=""
+        if [[ "${BENCH}" == "swebench" || "${BENCH}" == "terminalbench" ]]; then
+            BENCH_EXTRA="--interactive"
+        fi
 
         # Skip if already completed
         if [[ -f "${OUT_DIR}/summary.json" ]]; then
@@ -120,6 +135,8 @@ for model_spec in "${MODELS[@]}"; do
             --output_dir ${OUT_DIR} \
             --gen_workers ${GEN_WORKERS} \
             --verify_workers ${VERIFY_WORKERS} \
+            --pass-k ${PASS_K} \
+            ${BENCH_EXTRA} \
             ${EXTRA}"
 
         if $DRY_RUN; then
@@ -144,5 +161,5 @@ echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "  Done: ${DONE}/${TOTAL} evaluations"
 echo "  Results: ${EVAL_OUT}/"
-echo "  Collect: python scripts/collect_results.py --format md"
+echo "  Collect: python scripts/collect_results.py --root ${EVAL_OUT} --format md"
 echo "════════════════════════════════════════════════════════════"

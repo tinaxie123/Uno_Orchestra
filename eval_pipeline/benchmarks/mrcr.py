@@ -4,7 +4,7 @@ MRCR v2 (Multi-Round Context Reasoning) benchmark adapter.
 Tests model ability to reason over information scattered across multiple
 conversation rounds. Primarily a long-context + retrieval benchmark.
 
-Dataset: self-constructed or from official MRCR release
+Dataset: MRCR v2 release
 Format:  Multi-round conversation → final question requiring cross-round reasoning
 Verify:  Exact match or F1 on extracted answer
 """
@@ -48,6 +48,8 @@ def _extract_answer(text: str) -> str:
 
 class MRCR(BaseBenchmark):
     """MRCR v2: Multi-Round Context Reasoning benchmark."""
+    scoring_mode = "uno_harness"
+    score_name = "Uno harness score"
 
     def __init__(self, dataset="google/mrcr", split="test"):
         self.dataset = dataset

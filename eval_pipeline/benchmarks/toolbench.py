@@ -47,6 +47,8 @@ def _extract_function_calls(text: str) -> list[dict]:
 
 class ToolBench(BaseBenchmark):
     """ToolBench: Tool routing and function selection benchmark."""
+    scoring_mode = "uno_harness"
+    score_name = "Uno harness score"
 
     def __init__(self, dataset="Team-ACE/ToolACE", split="train",
                  max_default=1000):

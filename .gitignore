@@ -4,6 +4,8 @@
 # Keep gitignore and README.
 !.gitignore
 !README.md
+!.env.example
+!CITATION.cff
 
 # Keep docs.
 !docs/
@@ -17,9 +19,15 @@
 !scripts/
 !scripts/**
 
-# Keep agent system code.
-!agent_system/
-!agent_system/**
+# Keep runtime environment and orchestrator code.
+!env/
+!env/**
+!uno_orchestor/
+!uno_orchestor/**
+
+# Keep runnable examples.
+!examples/
+!examples/**
 
 # Keep eval pipeline.
 !eval_pipeline/

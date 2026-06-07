@@ -256,6 +256,16 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        for key in (
+            "agentic_turn_start",
+            "agentic_turn_end",
+            "agentic_turn_index",
+            "agentic_action_type",
+            "agentic_turn_shaping_reward",
+            "agentic_parent_prefix_hash",
+        ):
+            if key in data.non_tensor_batch:
+                adv_kwargs[key] = data.non_tensor_batch[key]
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)

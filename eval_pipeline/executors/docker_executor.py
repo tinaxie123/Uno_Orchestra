@@ -13,6 +13,26 @@ from .base_executor import BaseExecutor
 from .docker_manager import DockerComposeEnvVars, DockerComposeManager
 
 
+def _container_proxy_exports() -> str:
+    """Return shell exports for optional container proxy settings."""
+    mappings = {
+        "http_proxy": os.environ.get("TBENCH_HTTP_PROXY") or os.environ.get("http_proxy"),
+        "https_proxy": os.environ.get("TBENCH_HTTPS_PROXY") or os.environ.get("https_proxy"),
+        "all_proxy": os.environ.get("TBENCH_ALL_PROXY") or os.environ.get("all_proxy"),
+        "no_proxy": os.environ.get("TBENCH_NO_PROXY") or os.environ.get("no_proxy"),
+    }
+    exports = []
+    for key, value in mappings.items():
+        if not value:
+            continue
+        exports.append(f"export {key}={sh_quote(value)} {key.upper()}={sh_quote(value)}")
+    return "; ".join(exports)
+
+
+def sh_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
 class DockerExecutor(BaseExecutor):
     """Executes Terminal Bench tasks in Docker containers."""
 
@@ -260,18 +280,8 @@ class DockerExecutor(BaseExecutor):
         # Use provided timeout or default
         exec_timeout = timeout if timeout is not None else self.docker_timeout
 
-        # Wrap command with proxy env vars so curl/wget/pip/apt all use proxy
-        proxy_host = "172.17.0.1"
-        proxy_http = f"http://{proxy_host}:7890"
-        proxy_socks = f"socks5://{proxy_host}:7890"
-        wrapped = (
-            f"export http_proxy={proxy_http} https_proxy={proxy_http} "
-            f"all_proxy={proxy_socks} "
-            f"HTTP_PROXY={proxy_http} HTTPS_PROXY={proxy_http} "
-            f"ALL_PROXY={proxy_socks} "
-            f"no_proxy=localhost,127.0.0.1; "
-            f"{command}"
-        )
+        proxy_exports = _container_proxy_exports()
+        wrapped = f"{proxy_exports}; {command}" if proxy_exports else command
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -336,19 +346,8 @@ class DockerExecutor(BaseExecutor):
                         timeout=30,
                     )
 
-            # Inject proxy into container before running test.sh
-            # This ensures curl/wget/pip/apt all use the proxy, even in subshells
-            proxy_host = "172.17.0.1"
-            proxy_http = f"http://{proxy_host}:7890"
-            proxy_socks = f"socks5://{proxy_host}:7890"
-            proxy_setup = (
-                f'export http_proxy={proxy_http} https_proxy={proxy_http} '
-                f'all_proxy={proxy_socks} '
-                f'HTTP_PROXY={proxy_http} HTTPS_PROXY={proxy_http} '
-                f'ALL_PROXY={proxy_socks} '
-                f'no_proxy=localhost,127.0.0.1; '
-                f'bash /tmp/test.sh'
-            )
+            proxy_exports = _container_proxy_exports()
+            proxy_setup = f"{proxy_exports}; bash /tmp/test.sh" if proxy_exports else "bash /tmp/test.sh"
             proc = await asyncio.create_subprocess_exec(
                 "docker", "exec", self.container_id, "bash", "-c", proxy_setup,
                 stdout=asyncio.subprocess.PIPE,

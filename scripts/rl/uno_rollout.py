@@ -29,11 +29,12 @@ Known v1 simplifications (to be revisited in follow-up commits):
 - Observations are wrapped as a `user` chat turn + re-applied template
   (matches upstream ToolAgentLoop). Whether the SFT fixtures used the
   exact same framing is the subject of the byte-identity test.
-- No logprobs, no multimodal, no per-turn reward signal.
+- No logprobs or multimodal signal.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 from typing import Any
@@ -51,7 +52,7 @@ from verl.experimental.agent_loop.agent_loop import (
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 
-from agent_system.environments.env_package.uno.envs import (
+from env.env_package.uno.envs import (
     SingleUnoEnv,
     _rolling_percentile_cost_reward,
 )
@@ -89,6 +90,12 @@ class UnoAgentLoop(AgentLoopBase):
         self.response_length = int(config.actor_rollout_ref.rollout.response_length)
         # Outcome/cost blend weight; see _DEFAULT_ALPHA for rationale.
         self.alpha = float(multi_turn.get("alpha", _DEFAULT_ALPHA))
+        self.agentic_shaping_eta = float(
+            multi_turn.get("agentic_shaping_eta", multi_turn.get("shaping_eta", 0.05))
+        )
+        self.agentic_shaping_mode = str(
+            multi_turn.get("agentic_shaping_mode", multi_turn.get("shaping_mode", "process"))
+        )
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
@@ -132,8 +139,15 @@ class UnoAgentLoop(AgentLoopBase):
         done_reason = "max_turns"
         env_terminal_reward = 0.0
         env_meta_last: dict[str, Any] = {}
+        turn_starts: list[int] = []
+        turn_ends: list[int] = []
+        turn_indices: list[int] = []
+        turn_action_types: list[str] = []
+        turn_shaping_rewards: list[float] = []
+        turn_parent_prefix_hashes: list[str] = []
 
         for _turn in range(self.max_turns):
+            parent_prefix_hash = _hash_token_prefix(full_ids)
             with simple_timer("generate_sequences", metrics):
                 gen = await self.server_manager.generate(
                     request_id=request_id,
@@ -145,11 +159,27 @@ class UnoAgentLoop(AgentLoopBase):
                 done_reason = "empty_generation"
                 break
 
+            turn_start = len(response_mask)
             full_ids.extend(turn_ids)
             response_mask.extend([1] * len(turn_ids))
             num_turns += 1
+            turn_end = min(len(response_mask), self.response_length)
             if len(response_mask) >= self.response_length:
                 done_reason = "response_length"
+                _append_turn_credit_metadata(
+                    turn_starts,
+                    turn_ends,
+                    turn_indices,
+                    turn_action_types,
+                    turn_shaping_rewards,
+                    turn_parent_prefix_hashes,
+                    start=turn_start,
+                    end=turn_end,
+                    turn_index=num_turns,
+                    action_type="response_length",
+                    shaping_reward=0.0,
+                    parent_prefix_hash=parent_prefix_hash,
+                )
                 break
             turn_text = await loop.run_in_executor(
                 None,
@@ -157,8 +187,8 @@ class UnoAgentLoop(AgentLoopBase):
                     ids, skip_special_tokens=True
                 ),
             )
-            # env.step() calls call_sub_agent_api() over HTTP in a loop
-            # over routes (envs.py:350). Running it inline would block the
+            # env.step() dispatches route primitives through the UNO harness.
+            # Running it inline would block the
             # AgentLoopWorker's event loop, stalling all other rollouts on
             # the same worker — that's the v3-v6b smoke hang.
             # Default-arg lambda binds turn_text at definition time, since
@@ -169,6 +199,27 @@ class UnoAgentLoop(AgentLoopBase):
             )
             env_meta_last = step.get("metadata", {}) or {}
             n_route_calls += int(env_meta_last.get("n_routes", 0))
+            action_type = _classify_turn_action(env_meta_last, step_done=bool(step["done"]))
+            shaping_reward = _compute_turn_shaping_reward(
+                env_meta_last,
+                action_type=action_type,
+                eta=self.agentic_shaping_eta,
+                mode=self.agentic_shaping_mode,
+            )
+            _append_turn_credit_metadata(
+                turn_starts,
+                turn_ends,
+                turn_indices,
+                turn_action_types,
+                turn_shaping_rewards,
+                turn_parent_prefix_hashes,
+                start=turn_start,
+                end=turn_end,
+                turn_index=num_turns,
+                action_type=action_type,
+                shaping_reward=shaping_reward,
+                parent_prefix_hash=parent_prefix_hash,
+            )
 
             if step["done"]:
                 if env_meta_last.get("final_answer") is not None:
@@ -267,6 +318,12 @@ class UnoAgentLoop(AgentLoopBase):
             "done_reason": done_reason,
             "data_source": env.data_source,
             "source": env.source,
+            "agentic_turn_start": turn_starts,
+            "agentic_turn_end": turn_ends,
+            "agentic_turn_index": turn_indices,
+            "agentic_action_type": turn_action_types,
+            "agentic_turn_shaping_reward": turn_shaping_rewards,
+            "agentic_parent_prefix_hash": turn_parent_prefix_hashes,
         }
         if logger.isEnabledFor(logging.INFO):
             logger.info(
@@ -303,3 +360,65 @@ def _compose_terminal_reward(
         return 0.0
     r_cost = _rolling_percentile_cost_reward(env.total_api_cost)
     return (1.0 - alpha) * correctness + alpha * r_cost
+
+
+def _append_turn_credit_metadata(
+    starts: list[int],
+    ends: list[int],
+    indices: list[int],
+    action_types: list[str],
+    shaping_rewards: list[float],
+    parent_prefix_hashes: list[str],
+    *,
+    start: int,
+    end: int,
+    turn_index: int,
+    action_type: str,
+    shaping_reward: float,
+    parent_prefix_hash: str,
+) -> None:
+    if end <= start:
+        return
+    starts.append(int(start))
+    ends.append(int(end))
+    indices.append(int(turn_index))
+    action_types.append(str(action_type))
+    shaping_rewards.append(float(shaping_reward))
+    parent_prefix_hashes.append(str(parent_prefix_hash))
+
+
+def _hash_token_prefix(token_ids: list[int]) -> str:
+    """Stable id for the parent conversation state before a branch action."""
+    h = hashlib.blake2b(digest_size=16)
+    for token_id in token_ids:
+        h.update(int(token_id).to_bytes(8, byteorder="little", signed=True))
+    return h.hexdigest()
+
+
+def _classify_turn_action(metadata: dict[str, Any], *, step_done: bool) -> str:
+    if metadata.get("format_error"):
+        return "format_error"
+    if metadata.get("timeout"):
+        return "timeout"
+    if metadata.get("final_answer") is not None:
+        return "lazy" if metadata.get("lazy_mode") else "final"
+    if int(metadata.get("n_routes", 0) or 0) > 0:
+        return "repair" if int(metadata.get("round", 1) or 1) > 1 else "route"
+    return "done" if step_done else "other"
+
+
+def _compute_turn_shaping_reward(
+    metadata: dict[str, Any], *, action_type: str, eta: float, mode: str = "process"
+) -> float:
+    eta = max(float(eta), 0.0)
+    if eta == 0:
+        return 0.0
+    mode = (mode or "process").strip().lower()
+    if mode in {"none", "off", "false", "0"}:
+        return 0.0
+    reward = eta if bool(metadata.get("format_valid", True)) else -eta
+    if action_type == "format_error":
+        reward = -eta
+    elif mode == "process" and action_type == "repair":
+        reward += 0.5 * eta
+    return max(-eta, min(eta, reward))

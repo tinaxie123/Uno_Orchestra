@@ -2,12 +2,13 @@
 Uno SFT adapter: <plan> → <route> → <obs> → <verify> → <final_answer>
 Uses schema v1.1 with real API sub-agent calls (same as RL training env).
 """
+import os
 import re
 import openai
 from .base import BaseRouter, RouteResult
 from ..config import DEFAULT_LOCAL_BASE, DEFAULT_API_BASE, compute_cost, resolve_model
-from agent_system.routing.uno.harness import build_default_harness
-from agent_system.routing.uno.primitives import Route
+from uno_orchestor.routing.uno.harness import build_default_harness
+from uno_orchestor.routing.uno.primitives import Route
 
 # Regex parsers for schema v1.1
 ROUTE_RE = re.compile(
@@ -17,7 +18,12 @@ ROUTE_RE = re.compile(
 FINAL_RE = re.compile(r'<final_answer>(.*?)</final_answer>', re.DOTALL)
 VERIFY_RE = re.compile(r'<verify round="(\d+)" status="([^"]+)"', re.DOTALL)
 
-SYSTEM_PROMPT_PATH = "/home/xieht/data/sft/system_prompt.txt"
+SYSTEM_PROMPT_PATH = os.environ.get(
+    "UNO_SYSTEM_PROMPT",
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../configs/uno/system_prompt.txt")
+    ),
+)
 
 
 class UnoSFT(BaseRouter):
@@ -143,4 +149,6 @@ class UnoSFT(BaseRouter):
             routed_backends=all_backends,
             total_cost=total_cost,
             total_tokens=total_tokens,
+            prompt_tokens=0,
+            completion_tokens=total_tokens,
         )

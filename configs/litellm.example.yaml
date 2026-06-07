@@ -1,0 +1,56 @@
+# Example LiteLLM proxy config for the worker API gateway.
+#
+# Start:
+#   pip install -e '.[gateway]'
+#   litellm --config configs/litellm.example.yaml --host 0.0.0.0 --port 9000
+#
+# Then set:
+#   API_BASE=http://localhost:9000/v1
+#
+# Replace the provider model env vars with models/accounts you actually have.
+# The model_name fields intentionally match configs/pools.yaml.
+
+model_list:
+  - model_name: gemini-2.5-flash-lite
+    litellm_params:
+      model: os.environ/GEMINI_FLASH_LITE_MODEL
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: gemini-2.5-flash
+    litellm_params:
+      model: os.environ/GEMINI_FLASH_MODEL
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: kimi-k2.5
+    litellm_params:
+      model: os.environ/KIMI_MODEL
+      api_key: os.environ/KIMI_API_KEY
+      api_base: os.environ/KIMI_API_BASE
+
+  - model_name: gemini-3-flash-preview
+    litellm_params:
+      model: os.environ/GEMINI_3_FLASH_MODEL
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: gpt-5.3-codex
+    litellm_params:
+      model: os.environ/CODEX_WORKER_MODEL
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: gpt-5.4
+    litellm_params:
+      model: os.environ/GPT_WORKER_MODEL
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: os.environ/CLAUDE_SONNET_MODEL
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: os.environ/CLAUDE_OPUS_MODEL
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

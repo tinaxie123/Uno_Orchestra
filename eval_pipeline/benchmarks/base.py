@@ -26,6 +26,8 @@ class VerifyResult:
 
 
 class BaseBenchmark(ABC):
+    scoring_mode: str = "official_compatible"
+    score_name: str = "Official-compatible score"
 
     @property
     @abstractmethod

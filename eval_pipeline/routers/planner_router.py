@@ -1,151 +1,83 @@
-"""
-PlannerRouter: wraps the full Planner → Router → Worker pipeline
-from scripts/data/agent.py.
+"""Compatibility entrypoint for the paper-style Uno evaluation router.
 
-This is the REAL evaluation router that matches the training framework:
-  Planner (plan_subtask/finish via LangChain tool calling)
-    → Router (route(model, skill) via LangChain tool calling)
-      → Worker API (9-model pool, real API calls)
-
-All benchmark adapters in eval_pipeline/benchmarks/ can use this router
-via the standard route() interface.
+Historically the CLI name ``--router planner`` pointed at an older
+Planner -> Router -> Worker implementation.  The paper
+architecture is a unified policy that emits decomposition and routing decisions
+in one assistant stream, so this compatibility class now reuses the same Uno
+schema/harness path as ``UnoSFT`` while preserving the old CLI surface.
 """
+
+from __future__ import annotations
+
 import json
-import asyncio
-import logging
-from .base import BaseRouter, RouteResult
-from ..config import DEFAULT_LOCAL_BASE, DEFAULT_API_BASE
+import openai
 
-logger = logging.getLogger(__name__)
+from .router_sft import UnoSFT
+from ..config import DEFAULT_API_BASE, DEFAULT_LOCAL_BASE, EVAL_MAX_TOKENS
 
 
-class PlannerRouter(BaseRouter):
-    """Full Planner → Router → Worker pipeline as an eval router.
-
-    Wraps scripts/data/agent.run_agent() to satisfy the BaseRouter interface.
-    """
+class PlannerRouter(UnoSFT):
+    """Paper-style unified Uno router, kept under the old ``planner`` name."""
 
     def __init__(
         self,
         planner_model: str = "Qwen/Qwen2.5-7B-Instruct",
-        router_model: str = "Qwen/Qwen2.5-7B-Instruct",
+        router_model: str | None = None,
         planner_api_base: str = DEFAULT_LOCAL_BASE,
-        router_api_base: str = DEFAULT_LOCAL_BASE,
+        router_api_base: str | None = None,
         sub_model_api_base: str = DEFAULT_API_BASE,
         planner_api_key: str = "EMPTY",
         router_api_key: str = "EMPTY",
         sub_model_api_key: str = "EMPTY",
-        planner_temperature: float = 0.7,
-        router_temperature: float = 0.3,
-        api_base: str = None,  # compat with build_router
-        api_key: str = None,   # compat with build_router
+        planner_temperature: float = 0.0,
+        router_temperature: float = 0.0,
+        api_base: str | None = None,
+        api_key: str | None = None,
     ):
+        model_name = router_model or planner_model
+        local_base = router_api_base or planner_api_base
+        super().__init__(
+            local_base=local_base,
+            api_base=sub_model_api_base or api_base or DEFAULT_API_BASE,
+            api_key=sub_model_api_key or api_key or "EMPTY",
+            model_name=model_name,
+        )
         self.planner_model = planner_model
-        self.router_model = router_model
-        self.planner_api_base = planner_api_base
-        self.router_api_base = router_api_base
-        self.sub_model_api_base = sub_model_api_base or api_base or DEFAULT_API_BASE
-        self.planner_api_key = planner_api_key
-        self.router_api_key = router_api_key
-        self.sub_model_api_key = sub_model_api_key or api_key or "EMPTY"
+        self.router_model = model_name
         self.planner_temperature = planner_temperature
         self.router_temperature = router_temperature
-
-        # Load pool config
-        import sys, os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-        from configs import load_pools
-        self.pools = load_pools()
+        self.chat_client = openai.OpenAI(base_url=planner_api_base, api_key=planner_api_key)
 
     @property
     def name(self) -> str:
         p = self.planner_model.split("/")[-1]
         r = self.router_model.split("/")[-1]
-        if p == r:
-            return f"PlannerRouter({p})"
-        return f"PlannerRouter(P={p},R={r})"
+        return f"UnoRouter({p})" if p == r else f"UnoRouter(P={p},R={r})"
 
-    def route(self, question: str, context: dict = None) -> RouteResult:
-        """Run the full Planner→Router→Worker pipeline synchronously."""
-        import sys, os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-        from scripts.data.agent import run_agent
-
-        try:
-            result = run_agent(
-                question=question,
-                planner_model=self.planner_model,
-                planner_api_base=self.planner_api_base,
-                planner_api_key=self.planner_api_key,
-                router_model=self.router_model,
-                router_api_base=self.router_api_base,
-                router_api_key=self.router_api_key,
-                sub_model_api_base=self.sub_model_api_base,
-                sub_model_api_key=self.sub_model_api_key,
-                pools=self.pools,
-                planner_temperature=self.planner_temperature,
-                router_temperature=self.router_temperature,
-            )
-        except Exception as e:
-            logger.error("[PlannerRouter] Pipeline error: %s", e)
-            return RouteResult(answer=f"Error: {e}", full_trace=str(e))
-
-        answer = result.get("answer", "")
-        models = result.get("models_used", [])
-        skills = result.get("skills_used", [])
-        decisions = result.get("routing_decisions", [])
-        messages = result.get("messages", [])
-
-        # Build full trace from messages
-        trace = json.dumps(messages, ensure_ascii=False, indent=1)[:5000]
-
-        return RouteResult(
-            answer=answer or "",
-            full_trace=trace,
-            route_count=len(models),
-            routed_models=models,
-            routed_skills=skills,
-            total_cost=0.0,  # TODO: compute from pools pricing
-            total_tokens=0,
+    def chat_completions(self, messages, tools=None, **kw):
+        """Expose raw chat completions for interactive Docker benchmarks."""
+        call_kw = dict(
+            model=self.planner_model,
+            messages=messages,
+            temperature=kw.get("temperature", self.planner_temperature),
+            max_tokens=kw.get("max_tokens", EVAL_MAX_TOKENS),
         )
-
-    async def aroute(self, question: str, context: dict = None) -> RouteResult:
-        """Run the full pipeline asynchronously."""
-        import sys, os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-        from scripts.data.agent import arun_agent
-
-        try:
-            result = await arun_agent(
-                question=question,
-                planner_model=self.planner_model,
-                planner_api_base=self.planner_api_base,
-                planner_api_key=self.planner_api_key,
-                router_model=self.router_model,
-                router_api_base=self.router_api_base,
-                router_api_key=self.router_api_key,
-                sub_model_api_base=self.sub_model_api_base,
-                sub_model_api_key=self.sub_model_api_key,
-                pools=self.pools,
-                planner_temperature=self.planner_temperature,
-                router_temperature=self.router_temperature,
-            )
-        except Exception as e:
-            logger.error("[PlannerRouter] Async pipeline error: %s", e)
-            return RouteResult(answer=f"Error: {e}", full_trace=str(e))
-
-        answer = result.get("answer", "")
-        models = result.get("models_used", [])
-        skills = result.get("skills_used", [])
-        messages = result.get("messages", [])
-        trace = json.dumps(messages, ensure_ascii=False, indent=1)[:5000]
-
-        return RouteResult(
-            answer=answer or "",
-            full_trace=trace,
-            route_count=len(models),
-            routed_models=models,
-            routed_skills=skills,
-            total_cost=0.0,
-            total_tokens=0,
-        )
+        if tools:
+            call_kw["tools"] = tools
+            call_kw["tool_choice"] = kw.get("tool_choice", "auto")
+        r = self.chat_client.chat.completions.create(**call_kw)
+        msg = r.choices[0].message
+        tool_calls = []
+        for tc in (msg.tool_calls or []):
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except Exception:
+                args = {"_raw": tc.function.arguments}
+            tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": args})
+        return {
+            "content": msg.content,
+            "tool_calls": tool_calls,
+            "completion_tokens": getattr(r.usage, "completion_tokens", 0) or 0,
+            "prompt_tokens": getattr(r.usage, "prompt_tokens", 0) or 0,
+            "model": self.planner_model,
+        }

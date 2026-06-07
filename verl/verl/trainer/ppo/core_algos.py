@@ -105,6 +105,7 @@ class AdvantageEstimator(str, Enum):
     GPG = "gpg"
     RLOO_VECTORIZED = "rloo_vectorized"
     GRPO_VECTORIZED = "grpo_vectorized"
+    AGENTIC_GRPO = "agentic_grpo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -353,6 +354,181 @@ def compute_grpo_vectorized_outcome_advantage(
             scalars = scores - mean_g[g]
         advantages = scalars.unsqueeze(-1) * response_mask
         return advantages, advantages
+
+
+def _as_turn_list(value: Any) -> list:
+    """Normalise object-array turn metadata into a Python list."""
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+@register_adv_est(AdvantageEstimator.AGENTIC_GRPO)
+def compute_agentic_grpo_turn_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    agentic_turn_start: np.ndarray | None = None,
+    agentic_turn_end: np.ndarray | None = None,
+    agentic_turn_index: np.ndarray | None = None,
+    agentic_action_type: np.ndarray | None = None,
+    agentic_turn_shaping_reward: np.ndarray | None = None,
+    agentic_parent_prefix_hash: np.ndarray | None = None,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Turn-level Agentic-GRPO credit assignment.
+
+    For rollout i and assistant turn t:
+        R_tilde[i,t] = gamma ** (T_i - t) * R(tau_i)
+                     + sum_{s=t}^{T_i} gamma ** (s - t) * r[i,s]
+
+    R_tilde is group-standardised over comparable branch actions: same
+    query uid, same parent prefix, and same action type. If rollout
+    metadata does not include parent-prefix ids, the estimator falls back
+    to matched turn index. The resulting scalar advantage is broadcast
+    over the policy tokens of that assistant turn.
+    """
+    if agentic_turn_start is None or agentic_turn_end is None:
+        return compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            epsilon=epsilon,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
+        )
+
+    gamma = float(config.get("gamma", 1.0) if config is not None else 1.0)
+    agentic_cfg = config.get("agentic_grpo", {}) if config is not None else {}
+    eta = float(agentic_cfg.get("shaping_eta", 0.05))
+    group_by_action_type = bool(agentic_cfg.get("group_by_action_type", True))
+    group_by_parent_prefix = bool(agentic_cfg.get("group_by_parent_prefix", True))
+    use_turn_shaping_reward = bool(agentic_cfg.get("use_turn_shaping_reward", True))
+
+    with torch.no_grad():
+        bsz, response_length = token_level_rewards.shape
+        seq_scores = token_level_rewards.sum(dim=-1)
+        advantages = torch.zeros_like(token_level_rewards)
+        returns = torch.zeros_like(token_level_rewards)
+
+        turn_records: list[tuple[int, int, int, tuple[Any, Any, str], int, torch.Tensor]] = []
+        grouped_returns: dict[tuple[Any, Any, str], list[torch.Tensor]] = defaultdict(list)
+        rows_with_turns: set[int] = set()
+
+        for i in range(bsz):
+            starts = [int(x) for x in _as_turn_list(agentic_turn_start[i])]
+            ends = [int(x) for x in _as_turn_list(agentic_turn_end[i])]
+            turn_ids = (
+                [int(x) for x in _as_turn_list(agentic_turn_index[i])]
+                if agentic_turn_index is not None
+                else list(range(1, len(starts) + 1))
+            )
+            action_types = (
+                [str(x) for x in _as_turn_list(agentic_action_type[i])]
+                if agentic_action_type is not None
+                else ["unknown"] * len(starts)
+            )
+            shaping = (
+                [float(x) for x in _as_turn_list(agentic_turn_shaping_reward[i])]
+                if agentic_turn_shaping_reward is not None
+                else [0.0] * len(starts)
+            )
+            parent_prefixes = (
+                [str(x) for x in _as_turn_list(agentic_parent_prefix_hash[i])]
+                if agentic_parent_prefix_hash is not None
+                else [""] * len(starts)
+            )
+            if not group_by_action_type:
+                action_types = ["all"] * len(starts)
+            if not use_turn_shaping_reward:
+                shaping = [0.0] * len(starts)
+
+            n_turns = min(
+                len(starts),
+                len(ends),
+                len(turn_ids),
+                len(action_types),
+                len(shaping),
+                len(parent_prefixes),
+            )
+            if n_turns == 0:
+                continue
+
+            clipped_shaping = [
+                float(np.clip(shaping[k], -eta, eta)) for k in range(n_turns)
+            ]
+            suffix_returns = [0.0] * n_turns
+            running = 0.0
+            for k in reversed(range(n_turns)):
+                running = clipped_shaping[k] + gamma * running
+                suffix_returns[k] = running
+
+            for k in range(n_turns):
+                start = max(0, min(int(starts[k]), response_length))
+                end = max(start, min(int(ends[k]), response_length))
+                if start >= end:
+                    continue
+                mask_slice = response_mask[i, start:end]
+                if mask_slice.sum() <= 0:
+                    continue
+
+                # turn_ids are 1-based in rollout metadata; fall back to
+                # position in the emitted turn list when malformed.
+                turn_id = int(turn_ids[k]) if int(turn_ids[k]) > 0 else k + 1
+                terminal_discount = gamma ** max(n_turns - (k + 1), 0)
+                turn_return = seq_scores[i] * terminal_discount + token_level_rewards.new_tensor(
+                    suffix_returns[k]
+                )
+                action_type = str(action_types[k])
+                parent_prefix = parent_prefixes[k]
+                branch_key = parent_prefix if group_by_parent_prefix and parent_prefix else turn_id
+                group_key = (index[i], branch_key, action_type)
+                turn_records.append((i, start, end, group_key, k, turn_return))
+                grouped_returns[group_key].append(turn_return)
+                rows_with_turns.add(i)
+
+        group_stats: dict[tuple[Any, int, str], tuple[torch.Tensor, torch.Tensor]] = {}
+        for key, values in grouped_returns.items():
+            stacked = torch.stack(values)
+            mean = stacked.mean()
+            std = stacked.std(unbiased=False) if stacked.numel() > 1 else stacked.new_tensor(0.0)
+            group_stats[key] = (mean, std)
+
+        for i, start, end, group_key, _k, turn_return in turn_records:
+            mean, std = group_stats[group_key]
+            if norm_adv_by_std_in_grpo:
+                adv = (turn_return - mean) / (std + epsilon)
+            else:
+                adv = turn_return - mean
+            advantages[i, start:end] = adv * response_mask[i, start:end]
+            returns[i, start:end] = turn_return * response_mask[i, start:end]
+
+        # If a rollout had no valid turn metadata, preserve vanilla GRPO
+        # behavior for that row instead of silently zeroing its gradients.
+        has_turns = torch.zeros(bsz, dtype=torch.bool, device=token_level_rewards.device)
+        if rows_with_turns:
+            has_turns[list(rows_with_turns)] = True
+        missing = (~has_turns) & (response_mask.sum(dim=-1) > 0)
+        if bool(missing.any()):
+            fallback_adv, fallback_ret = compute_grpo_outcome_advantage(
+                token_level_rewards=token_level_rewards[missing],
+                response_mask=response_mask[missing],
+                index=np.asarray(index)[missing.cpu().numpy()],
+                epsilon=epsilon,
+                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                config=config,
+            )
+            advantages[missing] = fallback_adv
+            returns[missing] = fallback_ret
+
+        return advantages, returns
 
 
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")

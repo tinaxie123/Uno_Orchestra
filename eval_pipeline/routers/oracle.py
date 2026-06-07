@@ -1,6 +1,6 @@
 import openai
 from .base import BaseRouter, RouteResult
-from ..config import COST_PER_M, EVAL_MAX_TOKENS, DEFAULT_API_BASE, resolve_model
+from ..config import EVAL_MAX_TOKENS, DEFAULT_API_BASE, resolve_model, compute_cost
 
 
 class OracleRouter(BaseRouter):
@@ -25,9 +25,11 @@ class OracleRouter(BaseRouter):
             )
             txt = r.choices[0].message.content or ""
             toks = getattr(r.usage, "completion_tokens", 0) or 0
-            cost = COST_PER_M.get(self.model_id, 10.0) * max(toks, 1) / 1e6
+            prompt_toks = getattr(r.usage, "prompt_tokens", 0) or 0
+            cost = compute_cost(self.model_id, toks, prompt_toks)
             return RouteResult(answer=txt, route_count=1, routed_models=[self.model_id],
-                               total_cost=cost, total_tokens=toks)
+                               total_cost=cost, total_tokens=toks + prompt_toks,
+                               prompt_tokens=prompt_toks, completion_tokens=toks)
         except Exception as e:
             return RouteResult(answer=f"Error: {e}", route_count=1, routed_models=[self.model_id])
 
@@ -56,6 +58,7 @@ class OracleRouter(BaseRouter):
             "content": msg.content,
             "tool_calls": tool_calls,
             "completion_tokens": getattr(r.usage, "completion_tokens", 0) or 0,
+            "prompt_tokens": getattr(r.usage, "prompt_tokens", 0) or 0,
             "model": self.model_id,
         }
 

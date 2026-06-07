@@ -2,7 +2,7 @@
 # Re-run toolace with tool definitions injected into questions
 set -euo pipefail
 
-PYTHON=/home/xieht/.conda/envs/marl/bin/python
+PYTHON="${PYTHON:-python}"
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 # Router: local Qwen 2.5 7B

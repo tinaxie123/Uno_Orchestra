@@ -42,6 +42,8 @@ def _extract_answer(text: str) -> str:
 
 class GAIA(BaseBenchmark):
     """GAIA: General AI Assistants benchmark."""
+    scoring_mode = "uno_harness"
+    score_name = "Uno harness score"
 
     def __init__(self, split="validation"):
         # test split has no labels; use validation

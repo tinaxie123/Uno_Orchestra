@@ -20,9 +20,25 @@ dependencies = [
     # Eval
     "matplotlib>=3.7",
     "numpy>=1.24",
+    "pydantic>=2.0",
+    "tomli>=2.0; python_version<'3.11'",
 ]
 
 [project.optional-dependencies]
+eval = [
+    "datasets>=2.14",
+    "evaluate>=0.4",
+    "openai>=1.0",
+    "pydantic>=2.0",
+    "sympy>=1.12",
+    "tqdm>=4.60",
+]
+docker = [
+    "swebench>=2.0",
+]
+gateway = [
+    "litellm[proxy]>=1.60",
+]
 serve = [
     "vllm>=0.6",
     "pyairports",
@@ -48,7 +64,7 @@ build-backend = "setuptools.build_meta"
 # `verl` is vendored as a read-only source tree at the repo root and reachable
 # via the launcher's sys.path injection; it is intentionally excluded from the
 # project's installable package set.
-include = ["configs*", "scripts*", "eval_pipeline*", "agent_system*"]
+include = ["configs*", "scripts*", "eval_pipeline*", "env*", "uno_orchestor*"]
 
 [tool.ruff]
 line-length = 120
