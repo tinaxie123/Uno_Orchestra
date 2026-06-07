@@ -6,6 +6,8 @@
 !README.md
 !.env.example
 !CITATION.cff
+!LICENSE
+!Notice.txt
 
 # Keep docs.
 !docs/
@@ -28,6 +30,10 @@
 # Keep runnable examples.
 !examples/
 !examples/**
+
+# Keep project figures used in README.
+!pictures/
+!pictures/**
 
 # Keep eval pipeline.
 !eval_pipeline/

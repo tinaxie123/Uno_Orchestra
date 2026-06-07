@@ -50,11 +50,6 @@ MODELS=(
     "RouterRL_Qwen25-7B_Plus|planner|Qwen/Qwen2.5-7B-Instruct|"
     "RouterRL_Qwen3-4B_Plus|planner|Qwen/Qwen3-4B|"
 
-    # ━━━ Full framework + claude-heavy pool ━━━
-    # TODO: implement pool ablation flag in Uno router
-    # "RouterRL_Qwen25-7B_Claude|planner|Qwen/Qwen2.5-7B-Instruct|"
-    # "RouterRL_Qwen3-4B_Claude|planner|Qwen/Qwen3-4B|"
-
     # ━━━ Pre-trained router models (update checkpoint paths) ━━━
     # "Router-R1|planner|/path/to/router-r1-checkpoint|"
     # "Wideseek-R1|planner|/path/to/wideseek-r1-checkpoint|"
